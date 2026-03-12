@@ -1,0 +1,427 @@
+Abstract
+This specification defines two mechanisms for communicating between browsing contexts in HTML documents.
+
+Status of This document
+This section describes the status of this document at the time of its publication. Other documents may supersede this document. A list of current W3C publications and the latest revision of this technical report can be found in the W3C technical reports index at http://www.w3.org/TR/.
+
+If you wish to make comments regarding this document in a manner that is tracked by the W3C, please submit them via using our public bug database. If you do not have an account then you can enter feedback using this form:
+
+Feedback Comments
+Please enter your feedback, carefully indicating the title of the section for which you are submitting feedback, quoting the text that's wrong today if appropriate. If you're suggesting a new feature, it's really important to say what the problem you're trying to solve is. That's more important than the solution, in fact.
+
+
+Please don't use section numbers as these tend to change rapidly and make your feedback harder to understand.
+
+(Note: Your IP address and user agent will be publicly recorded for spam prevention purposes.)
+
+You can also e-mail feedback to public-webapps@w3.org (subscribe, archives), or whatwg@whatwg.org (subscribe, archives). All feedback is welcome.
+
+Notifications of changes to this specification are sent along with notifications of changes to related specifications using the following mechanisms:
+
+E-mail notifications of changes
+Commit-Watchers mailing list (complete source diffs): http://lists.whatwg.org/listinfo.cgi/commit-watchers-whatwg.org
+Browsable version-control record of all changes:
+CVSWeb interface with side-by-side diffs: http://dev.w3.org/cvsweb/html5/
+Annotated summary with unified diffs: http://html5.org/tools/web-apps-tracker
+Raw Subversion interface: svn checkout http://svn.whatwg.org/webapps/
+The W3C Web Applications Working Group is the W3C working group responsible for this specification's progress along the W3C Recommendation track. This specification is the 01 May 2012 Candidate Recommendation. Comments for the 13 March 2012 Last Call Working Draft are tracked in the comment tracking document.
+
+This document was produced by a group operating under the 5 February 2004 W3C Patent Policy. W3C maintains a public list of any patent disclosures made in connection with the deliverables of the group; that page also includes instructions for disclosing a patent. An individual who has actual knowledge of a patent which the individual believes contains Essential Claim(s) must disclose the information in accordance with section 6 of the W3C Patent Policy.
+
+Candidate Recommendation Exit Criteria
+To exit the Candidate Recommendation (CR) stage, the following criteria must have been met:
+
+There will be at least two interoperable implementations passing all approved test cases in the test suite for this specification. An implementation is to be available (i.e. for download), shipping (i.e. not private), and not experimental (i.e. intended for a wide audience). The working group will decide when the test suite is of sufficient quality to test interoperability and will produce an implementation report (hosted together with the test suite).
+A minimum of three months of the CR stage will have elapsed (i.e. not until after 01 August 2012). This is to ensure that enough time is given for any remaining major errors to be caught. The CR period will be extended if implementations are slow to appear.
+Publication as a Candidate Recommendation does not imply endorsement by the W3C Membership. This is a draft document and may be updated, replaced or obsoleted by other documents at any time. It is inappropriate to cite this document as other than work in progress.
+
+Table of Contents
+1 Conformance requirements
+1.1 Dependencies
+2 Terminology
+3 Event definitions
+4 Cross-document messaging
+4.1 Introduction
+4.2 Security
+4.2.1 Authors
+4.2.2 User agents
+4.3 Posting messages
+5 Channel messaging
+5.1 Introduction
+5.1.1 Ports as the basis of an object-capability model on the Web
+5.1.2 Ports as the basis of abstracting out service implementations
+5.2 Message channels
+5.3 Message ports
+5.3.1 Ports and garbage collection
+References
+Acknowledgements
+1 Conformance requirements
+All diagrams, examples, and notes in this specification are non-normative, as are all sections explicitly marked non-normative. Everything else in this specification is normative.
+
+The key words "MUST", "MUST NOT", "REQUIRED", "SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in the normative parts of this document are to be interpreted as described in RFC2119. For readability, these words do not appear in all uppercase letters in this specification. [RFC2119]
+
+Requirements phrased in the imperative as part of algorithms (such as "strip any leading space characters" or "return false and abort these steps") are to be interpreted with the meaning of the key word ("must", "should", "may", etc) used in introducing the algorithm.
+
+Some conformance requirements are phrased as requirements on attributes, methods or objects. Such requirements are to be interpreted as requirements on user agents.
+
+Conformance requirements phrased as algorithms or specific steps may be implemented in any manner, so long as the end result is equivalent. (In particular, the algorithms defined in this specification are intended to be easy to follow, and not intended to be performant.)
+
+The only conformance class defined by this specification is user agents.
+
+User agents may impose implementation-specific limits on otherwise unconstrained inputs, e.g. to prevent denial of service attacks, to guard against running out of memory, or to work around platform-specific limitations.
+
+When support for a feature is disabled (e.g. as an emergency measure to mitigate a security problem, or to aid in development, or for performance reasons), user agents must act as if they had no support for the feature whatsoever, and as if the feature was not mentioned in this specification. For example, if a particular feature is accessed via an attribute in a Web IDL interface, the attribute itself would be omitted from the objects that implement that interface — leaving the attribute on the object but making it return null or throw an exception is insufficient.
+
+1.1 Dependencies
+This specification relies on several other underlying specifications.
+
+HTML
+Many fundamental concepts from HTML are used by this specification. [HTML]
+
+WebIDL
+The IDL blocks in this specification use the semantics of the WebIDL specification. [WEBIDL]
+
+2 Terminology
+The construction "a Foo object", where Foo is actually an interface, is sometimes used instead of the more accurate "an object implementing the interface Foo".
+
+The term DOM is used to refer to the API set made available to scripts in Web applications, and does not necessarily imply the existence of an actual Document object or of any other Node objects as defined in the DOM Core specifications. [DOMCORE]
+
+An IDL attribute is said to be getting when its value is being retrieved (e.g. by author script), and is said to be setting when a new value is assigned to it.
+
+3 Event definitions
+Messages in server-sent events, Web sockets, cross-document messaging, and channel messaging use the message event. [EVENTSOURCE] [WEBSOCKET]
+
+The following interface is defined for this event:
+
+[Constructor(DOMString type, optional MessageEventInit eventInitDict)]
+interface MessageEvent : Event {
+  readonly attribute any data;
+  readonly attribute DOMString origin;
+  readonly attribute DOMString lastEventId;
+  readonly attribute WindowProxy? source;
+  readonly attribute MessagePort[]? ports;
+};
+
+dictionary MessageEventInit : EventInit {
+  any data;
+  DOMString origin;
+  DOMString lastEventId;
+  WindowProxy? source;
+  MessagePort[]? ports;
+};
+event . data
+Returns the data of the message.
+
+event . origin
+Returns the origin of the message, for server-sent events and cross-document messaging.
+
+event . lastEventId
+Returns the last event ID string, for server-sent events.
+
+event . source
+Returns the WindowProxy of the source window, for cross-document messaging.
+
+event . ports
+Returns the MessagePort array sent with the message, for cross-document messaging and channel messaging.
+
+The data attribute must return the value it was initialized to. When the object is created, this attribute must be initialized to null. It represents the message being sent.
+
+The origin attribute must return the value it was initialized to. When the object is created, this attribute must be initialized to the empty string. It represents, in server-sent events and cross-document messaging, the origin of the document that sent the message (typically the scheme, hostname, and port of the document, but not its path or fragment identifier).
+
+The lastEventId attribute must return the value it was initialized to. When the object is created, this attribute must be initialized to the empty string. It represents, in server-sent events, the last event ID string of the event source.
+
+The source attribute must return the value it was initialized to. When the object is created, this attribute must be initialized to null. It represents, in cross-document messaging, the WindowProxy of the browsing context of the Window object from which the message came.
+
+The ports attribute must return the value it was initialized to. When the object is created, this attribute must be initialized to null. It represents, in cross-document messaging and channel messaging the MessagePort array being sent, if any.
+
+4 Cross-document messaging
+Web browsers, for security and privacy reasons, prevent documents in different domains from affecting each other; that is, cross-site scripting is disallowed.
+
+While this is an important security feature, it prevents pages from different domains from communicating even when those pages are not hostile. This section introduces a messaging system that allows documents to communicate with each other regardless of their source domain, in a way designed to not enable cross-site scripting attacks.
+
+The task source for the tasks in cross-document messaging is the posted message task source.
+
+4.1 Introduction
+This section is non-normative.
+
+For example, if document A contains an iframe element that contains document B, and script in document A calls postMessage() on the Window object of document B, then a message event will be fired on that object, marked as originating from the Window of document A. The script in document A might look like:
+
+var o = document.getElementsByTagName('iframe')[0];
+o.contentWindow.postMessage('Hello world', 'http://b.example.org/');
+To register an event handler for incoming events, the script would use addEventListener() (or similar mechanisms). For example, the script in document B might look like:
+
+window.addEventListener('message', receiver, false);
+function receiver(e) {
+  if (e.origin == 'http://example.com') {
+    if (e.data == 'Hello world') {
+      e.source.postMessage('Hello', e.origin);
+    } else {
+      alert(e.data);
+    }
+  }
+}
+This script first checks the domain is the expected domain, and then looks at the message, which it either displays to the user, or responds to by sending a message back to the document which sent the message in the first place.
+
+4.2 Security
+4.2.1 Authors
+Use of this API requires extra care to protect users from hostile entities abusing a site for their own purposes.
+
+Authors should check the origin attribute to ensure that messages are only accepted from domains that they expect to receive messages from. Otherwise, bugs in the author's message handling code could be exploited by hostile sites.
+
+Furthermore, even after checking the origin attribute, authors should also check that the data in question is of the expected format. Otherwise, if the source of the event has been attacked using a cross-site scripting flaw, further unchecked processing of information sent using the postMessage() method could result in the attack being propagated into the receiver.
+
+Authors should not use the wildcard keyword (*) in the targetOrigin argument in messages that contain any confidential information, as otherwise there is no way to guarantee that the message is only delivered to the recipient to which it was intended.
+
+Authors who accept messages from any origin are encouraged to consider the risks of a denial-of-service attack. An attacker could send a high volume of messages; if the receiving page performs expensive computation or causes network traffic to be sent for each such message, the attacker's message could be multplied into a denial-of-service attack. Authors are encouraged to employ rate limiting (only accepting a certain number of messages per minute) to make such attacks impractical.
+
+4.2.2 User agents
+The integrity of this API is based on the inability for scripts of one origin to post arbitrary events (using dispatchEvent() or otherwise) to objects in other origins (those that are not the same).
+
+Implementors are urged to take extra care in the implementation of this feature. It allows authors to transmit information from one domain to another domain, which is normally disallowed for security reasons. It also requires that UAs be careful to allow access to certain properties but not others.
+
+User agents are also encouraged to consider rate-limiting message traffic between different origins, to protect naïve sites from denial-of-service attacks.
+
+4.3 Posting messages
+window . postMessage(message, targetOrigin [, transfer ])
+Posts a message to the given window. Messages can be structured objects, e.g. nested objects and arrays, can contain JavaScript values (strings, numbers, Dates, etc), and can contain certain data objects such as File Blob, FileList, and ArrayBuffer objects.
+
+Objects listed in transfer are transferred, not just cloned, meaning that they are no longer usable on the sending side.
+
+If the origin of the target window doesn't match the given origin, the message is discarded, to avoid information leakage. To send the message to the target regardless of origin, set the target origin to "*". To restrict the message to same-origin targets only, without needing to explicitly state the origin, set the target origin to "/".
+
+Throws a DataCloneError if transfer array contains duplicate objects or if message could not be cloned.
+
+When posting a message to a Window of a browsing context that has just been navigated to a new Document is likely to result in the message not receiving its intended recipient: the scripts in the target browsing context have to have had time to set up listeners for the messages. Thus, for instance, in situations where a message is to be sent to the Window of newly created child iframe, authors are advised to have the child Document post a message to their parent announcing their readiness to receive messages, and for the parent to wait for this message before beginning posting messages.
+
+When a script invokes the postMessage(message, targetOrigin, transfer) method (with two or three arguments) on a Window object, the user agent must follow these steps:
+
+If the value of the targetOrigin argument is neither a single U+002A ASTERISK character (*), a single U+002F SOLIDUS character (/), nor an absolute URL, then throw a SyntaxError exception and abort the overall set of steps.
+
+Let new ports be an empty array.
+
+Let transfer map be an empty association list of Transferable objects to placeholder objects.
+
+If the method was invoked with a third argument transfer, run these substeps:
+
+If any object is listed in transfer more than once, or any of the Transferable objects listed in transfer are marked as neutered, then throw a DataCloneError exception and abort these steps.
+
+For each object x in transfer in turn, add a mapping from x to a new unique placeholder object created for x to transfer map, and if x is a MessagePort object, also append the placeholder object to the new ports array.
+
+Let message clone be the result of obtaining a structured clone of the message argument, with transfer map as the transfer map. If this throws an exception, then throw that exception and abort these steps.
+
+If the method was invoked with a third argument transfer, run these substeps:
+
+Let new owner be the Window object on which the method was invoked.
+
+For each object x in transfer in turn, obtain a new object y by transferring the object x to new owner, and replace the placeholder object that was created for the object x by the new object y wherever the placeholder exists (i.e. in message clone and in new ports).
+
+Make new ports into a read only array.
+
+Return from the postMessage() method, but asynchronously continue running these steps.
+
+If the targetOrigin argument is a single literal U+002F SOLIDUS character (/), and the Document of the Window object on which the method was invoked does not have the same origin as the entry script's document, then abort these steps silently.
+
+Otherwise, if the targetOrigin argument is an absolute URL, and the Document of the Window object on which the method was invoked does not have the same origin as targetOrigin, then abort these steps silently.
+
+Otherwise, the targetOrigin argument is a single literal U+002A ASTERISK character (*), and no origin check is made.
+
+Create an event that uses the MessageEvent interface, with the event name message, which does not bubble, is not cancelable, and has no default action. The data attribute must be initialized to the value of message clone, the origin attribute must be initialized to the Unicode serialization of the origin of the script that invoked the method, the source attribute must be initialized to the script's global object's WindowProxy object, and the ports attribute must be initialized to the new ports array. [HTML]
+
+Queue a task to dispatch the event created in the previous step at the Window object on which the method was invoked. The task source for this task is the posted message task source.
+
+5 Channel messaging
+5.1 Introduction
+This section is non-normative.
+
+To enable independent pieces of code (e.g. running in different browsing contexts) to communicate directly, authors can use channel messaging.
+
+Communication channels in this mechanisms are implemented as two-ways pipes, with a port at each end. Messages sent in one port are delivered at the other port, and vice-versa. Messages are asynchronous, and delivered as DOM events.
+
+To create a connection (two "entangled" ports), the MessageChannel() constructor is called:
+
+var channel = new MessageChannel();
+One of the ports is kept as the local port, and the other port is sent to the remote code, e.g. using postMessage():
+
+otherWindow.postMessage('hello', 'http://example.com', [channel.port2]);
+To send messages, the postMessage() method on the port is used:
+
+channel.port1.postMessage('hello');
+To receive messages, one listens to message events:
+
+channel.port1.onmessage = handleMessage;
+function handleMessage(event) {
+  // message is in event.data
+  // ...
+}
+Data sent on a port can be structured data; for example here an array of strings is passed:
+
+port1.postMessage(['hello', 'world'], 'http://example.com');
+5.1.1 Ports as the basis of an object-capability model on the Web
+This section is non-normative.
+
+Ports can be viewed as a way to expose limited capabilities (in the object-capability model sense) to other actors in the system. This can either be a weak capability system, where the ports are merely used as a convenient model within a particular origin, or as a strong capability model, where they are provided by one origin provider as the only mechanism by which another origin consumer can effect change in or obtain information from provider.
+
+For example, consider a situation in which a social Web site embeds in one iframe the user's e-mail contacts provider (an address book site, from a second origin), and in a second iframe a game (from a third origin). The outer social site and the game in the second iframe cannot access anything inside the first iframe; together they can only:
+
+Navigate the iframe to a new URL, such as the same URL but with a different fragment identifier, causing the Window in the iframe to receive a hashchange event.
+Resize the iframe, causing the Window in the iframe to receive a resize event.
+Send a message event to the Window in the iframe using the window.postMessage() API.
+The contacts provider can use these methods, most particularly the third one, to provide an API that can be accessed by other origins to manipulate the user's address book. For example, it could respond to a message "add-contact Guillaume Tell <tell@pomme.example.net>" by adding the given person and e-mail address to the user's address book.
+
+To avoid any site on the Web being able to manipulate the user's contacts, the contacts provider might only allow certain trusted sites, such as the social site, to do this.
+
+Now suppose the game wanted to add a contact to the user's address book, and that the social site was willing to allow it to do so on its behalf, essentially "sharing" the trust that the contacts provider had with the social site. There are several ways it could do this; most simply, it could just proxy messages between the game site and the contacts site. However, this solution has a number of difficulties: it requires the social site to either completely trust the game site not to abuse the privilege, or it requires that the social site verify each request to make sure it's not a request that it doesn't want to allow (such as adding multiple contacts, reading the contacts, or deleting them); it also requires some additional complexity if there's ever the possibility of multiple games simultaneously trying to interact with the contacts provider.
+
+Using message channels and MessagePort objects, however, all of these problems can go away. When the game tells the social site that it wants to add a contact, the social site can ask the contacts provider not for it to add a contact, but for the capability to add a single contact. The contacts provider then creates a pair of MessagePort objects, and sends one of them back to the social site, who forwards it on to the game. The game and the contacts provider then have a direct connection, and the contacts provider knows to only honor a single "add contact" request, nothing else. In other words, the game has been granted the capability to add a single contact.
+
+5.1.2 Ports as the basis of abstracting out service implementations
+This section is non-normative.
+
+Continuing the example from the previous section, consider the contacts provider in particular. While an initial implementation might have simply used XMLHttpRequest objects in the service's iframe, an evolution of the service might instead want to use a shared worker with a single WebSocket connection.
+
+If the initial design used MessagePort objects to grant capabilities, or even just to allow multiple simultaneous independent sessions, the service implementation can switch from the XMLHttpRequests-in-each-iframe model to the shared-WebSocket model without changing the API at all: the ports on the service provider side can all be forwarded to the shared worker without it affecting the users of the API in the slightest.
+
+5.2 Message channels
+[Constructor]
+interface MessageChannel {
+  readonly attribute MessagePort port1;
+  readonly attribute MessagePort port2;
+};
+channel = new MessageChannel()
+Returns a new MessageChannel object with two new MessagePort objects.
+
+channel . port1
+Returns the first MessagePort object.
+
+channel . port2
+Returns the second MessagePort object.
+
+When the MessageChannel() constructor is called, it must run the following algorithm:
+
+Create a new MessagePort object owned by the script's global object, and let port1 be that object.
+
+Create a new MessagePort object owned by the script's global object, and let port2 be that object.
+
+Entangle the port1 and port2 objects.
+
+Instantiate a new MessageChannel object, and let channel be that object.
+
+Let the port1 attribute of the channel object be port1.
+
+Let the port2 attribute of the channel object be port2.
+
+Return channel.
+
+This constructor must be visible when the script's global object is either a Window object or an object implementing the WorkerUtils interface.
+
+The port1 and port2 attributes must return the values they were assigned when the MessageChannel object was created.
+
+5.3 Message ports
+Each channel has two message ports. Data sent through one port is received by the other port, and vice versa.
+
+interface MessagePort : EventTarget {
+  void postMessage(any message, optional sequence<Transferable> transfer);
+  void start();
+  void close();
+
+  // event handlers
+  [TreatNonCallableAsNull] attribute Function? onmessage;
+};
+MessagePort implements Transferable;
+port . postMessage(message [, transfer] )
+Posts a message through the channel. Objects listed in transfer are transferred, not just cloned, meaning that they are no longer usable on the sending side.
+
+Throws a DataCloneError if transfer array contains duplicate objects or the source or target ports, or if message could not be cloned.
+
+port . start()
+Begins dispatching messages received on the port.
+
+port . close()
+Disconnects the port, so that it is no longer active.
+
+Each MessagePort object can be entangled with another (a symmetric relationship). Each MessagePort object also has a task source called the port message queue, initially empty. A port message queue can be enabled or disabled, and is initially disabled. Once enabled, a port can never be disabled again (though messages in the queue can get moved to another queue or removed altogether, which has much the same effect).
+
+When the user agent is to create a new MessagePort object owned by a script's global object object owner, it must instantiate a new MessagePort object, and let its owner be owner.
+
+When the user agent is to entangle two MessagePort objects, it must run the following steps:
+
+If one of the ports is already entangled, then disentangle it and the port that it was entangled with.
+
+If those two previously entangled ports were the two ports of a MessageChannel object, then that MessageChannel object no longer represents an actual channel: the two ports in that object are no longer entangled.
+
+Associate the two ports to be entangled, so that they form the two parts of a new channel. (There is no MessageChannel object that represents this channel.)
+
+When the user agent is to clone a port original port, with the clone being owned by owner, it must run the following steps, which return a new MessagePort object. These steps must be run atomically.
+
+Create a new MessagePort object owned by owner, and let new port be that object.
+
+Move all the events in the port message queue of original port to the port message queue of new port, if any, leaving the new port's port message queue in its initial disabled state.
+
+If the original port is entangled with another port, then run these substeps:
+
+Let the remote port be the port with which the original port is entangled.
+
+Entangle the remote port and new port objects. The original port object will be disentangled by this process.
+
+Return new port. It is the clone.
+
+To transfer a MessagePort object old to a new owner owner, a user agent must clone the old object with the clone being owned by owner, thus obtaining new, must neuter the old port, and must finally return new.
+
+The postMessage() method, when called on a port source port, must cause the user agent to run the following steps:
+
+Let target port be the port with which source port is entangled, if any.
+
+Let new ports be an empty array.
+
+Let transfer map be an empty association list of Transferable objects to placeholder objects.
+
+If the method was invoked with a second argument transfer, run these substeps:
+
+If any object is listed in transfer more than once, or any of the Transferable objects listed in transfer are marked as neutered, then throw a DataCloneError exception and abort these steps.
+
+If any of the objects in transfer are either the source port or the target port (if any), then throw a DataCloneError exception and abort these steps.
+
+For each object x in transfer in turn, add a mapping from x to a new unique placeholder object created for x to transfer map, and if x is a MessagePort object, also append the placeholder object to the new ports array.
+
+Let message clone be the result of obtaining a structured clone of the message argument, with transfer map as the transfer map. If this throws an exception, then throw that exception and abort these steps.
+
+If the method was invoked with a second argument transfer, run these substeps:
+
+Let new owner be the owner of target port, if there is a target port, or else some arbitrary owner. (This new owner is used when transfering objects below. If there is no target port, the Transferable objects given in the second argument, if any, are still transfered, but since they are then discarded, it doesn't matter where they are transfered to.)
+
+For each object x in transfer in turn, obtain a new object y by transferring the object x to new owner, and replace the placeholder object that was created for the object x by the new object y wherever the placeholder exists (i.e. in message clone and in new ports).
+
+Make new ports into a read only array.
+
+If there is no target port (i.e. if source port is not entangled), then abort these steps.
+
+Create an event that uses the MessageEvent interface, with the name message, which does not bubble, is not cancelable, and has no default action. [HTML]
+
+Let the data attribute of the event be initialized to the value of message clone.
+
+Let the ports attribute of the event be initialized to the new ports array.
+
+Add the event to the port message queue of target port.
+
+The start() method must enable its port's port message queue, if it is not already enabled.
+
+When a port's port message queue is enabled, the event loop must use it as one of its task sources.
+
+If the Document of the port's event listeners' global object is not fully active, then the messages are lost.
+
+The close() method, when called on a port local port that is entangled with another port, must cause the user agents to disentangle the two ports. If the method is called on a port that is not entangled, then the method must do nothing.
+
+The following are the event handlers (and their corresponding event handler event types) that must be supported, as IDL attributes, by all objects implementing the MessagePort interface:
+
+Event handler	Event handler event type
+onmessage	message
+The first time a MessagePort object's onmessage IDL attribute is set, the port's port message queue must be enabled, as if the start() method had been called.
+
+5.3.1 Ports and garbage collection
+When a MessagePort object o is entangled, user agents must either act as if o's entangled MessagePort object has a strong reference to o, or as if o's owner has a strong reference to o.
+
+Thus, a message port can be received, given an event listener, and then forgotten, and so long as that event listener could receive a message, the channel will be maintained.
+
+Of course, if this was to occur on both sides of the channel, then both ports could be garbage collected, since they would not be reachable from live code, despite having a strong reference to each other.
+
+Furthermore, a MessagePort object must not be garbage collected while there exists a message in a task queue that is to be dispatched on that MessagePort object, or while the MessagePort object's port message queue is open and there exists a message event in that queue.

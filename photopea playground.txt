@@ -1,0 +1,29 @@
+Playground
+Enter the JSON configuration file, which will be encoded into the URL:
+
+{
+    "files": [ 
+        "https://www.photopea.com/api/img2/pug.png"
+    ],
+    "environment": {
+        
+    }
+}
+Update
+
+URL: 
+https://www.photopea.com#%7B%22files%22%3A%5B%22https%3A%2F%2Fwww.photopea.com%2Fapi%2Fimg2%2Fpug.png%22%5D%2C%22environment%22%3A%7B%7D%7D
+ 
+Run a script
+app.activeDocument.activeLayer.translate(20,20);
+Run
+
+Messages from Photopea
+done
+done
+done
+done
+done
+done
+done
+done

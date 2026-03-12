@@ -1,0 +1,113 @@
+Environment
+The look of the editor can be customized by the environment property of the JSON.
+
+{
+	...
+	"environment" : {          
+		"theme"     : 2,         "lang"     : "es",    
+		"vmode"     : 0,         "intro"    : true,
+		"eparams"   : { "guides" :true, "grid" : true, "gsize": 8,   
+		                                "paths": true, "pgrid": true },
+		"customIO"  : { "open": "app.echoToOE(\"Open\");", "exportAs":true },
+		"localsave" : false,     "autosave" : 120,    
+		"showtools" : [0,5,9],   "menus"    : [ [1,1,0,1], 1, 0, 1, [0] ],
+		"panels"    : [0, 2],
+		
+		"phrases"   : [ [1,0], "Open Design", [1,2], "Save Design" ],
+		
+		"topt"  : {  "t0": ...,  "t1": ...,  ... },
+		"tmnu"  : {  "t0": ...,  "t1": ...,  ... },
+		"icons" : {  "tools/crop": "https://www.me.com/img/crop.png",  ... },
+		"plugins":[ ... ]
+	}
+}
+Each parameter is optional. They have the following meaning:
+
+theme - theme (0, 1, 2, ...)
+lang - language
+vmode - view mode. 0: regular, 1: panels are collapsed, 2: hide all panels
+intro - when no documents are open, show introduction panel (with buttons etc.)
+eparams - extras: enable or disable guides, grid, paths, pixel grid ...
+customIO - redefine the behavior of File - Open, Save etc. and run a custom script instead. Possible properties: "new", "open", "openFromURL", "takePic", "showTemplates", "save", "saveAsPSD", "publishOnline", "exportLayers".
+"exportAs": if true, clicking "Save" in the "Save for Web" window will send the ArrayBuffer with a file to the OE. Use the first bytes of data to determine the format.
+localsave - enable / disable "Save as PSD", "Save for Web" and "Publish Online"
+autosave - with a value X, Photopea will execute "File - Save" each X seconds
+showtools - show only following tools (see tool IDs below)
+menus - specify the structure of File, Edit, Image ... menus with 0/1 flags. Each element of an array is either 0: hide the item, 1: show the item with a standard content, or an array of flags for sub-items (works recursively). If your array is shorter than required, zeros will be added to the end. See the current menu structure of Photopea to find the right values. E.g. [1,1] as the first element means, that the "File" menu will be shown with "New" and "Open" items only.
+panels - what panels should be shown in a sidebar. Use following IDs:
+0: HISTORY, 1: SWATCHES, 2: LAYERS, 3: INFO, 4: HISTOGRAM, 5: PROPERTIES, 6: CSS, 7: BRUSH, 8: LAYERCOMPS, 9: CHARACTER, 10: PARAGRAPH, 11: ACTIONS, 12: NAVIGATOR, 13: COLOR, 14: TPRESET, 15: GUIDEGUY, 16: CHANNELS, 17: PATHS, 18: ADJUST, 19: GLYPHS, 20: MEMORY, 21: STYLE, 22: NOTES .
+phrases - allows you to replace any phrase inside Photopea with your own. The aray has the form [ ID1, W1, ID2, W2, ... ], where IDx is the ID of some phrase and Wx is a new phrase, that should be used instead.
+Some useful IDs: [1,2]: Save (File menu), [2,0]: Step Forward, [2,1]: Step Backward. To discover IDs of other phrases, get familiar with OpenWord table structure and find your phrase in a current phrase database (var LNG ...), or just write us an email to support@photopea.com.
+topt - tool options. Lets you change the settings of each tool. Keys are "tXY", where XY is the tool ID. Each tool has its own format (see below).
+tmnu - tool menu. Lets you specify the structure of the top menu for each tool. Keys are "tXY", where XY is the tool ID. Each tool has its own format (see below).
+icons - custom icons. Each icon has an icon ID (key) and the image URL (value). You can find icon IDs here (var PIMG ...). E.g. the Crop Tool has an ID "tools/crop". On the introduction screen, the logo is "logo", the bottom part is "bottom".
+plugins - described here
+Tool options and menus
+Move Tool
+Options: [1,0,null]. Three values mean Auto-Select, Transformation controls and Distances. 1 means enabled, 0: disabled, null: not specified.
+
+Menu: [1,1,1,1,1,1]. Six flags to show / hide six items: Auto-Select, Transformation controls, Distances, Quick Save (Get PNG...), Vertical Align, Horizontal Align.
+
+Magic Wand
+Options: [0,0,[16,true,true]] - Combining operation, Feather, Select options: Tolerance, Anti-alias, Contiguous.
+
+Crop Tool
+Options: [1,16,9] - Constraint mode (0,1,2), Width, Height.
+
+Tool IDs
+0: Move Tool
+70: Artboard Tool
+1: Rectangle Select
+2: Ellipse Select
+5: Lasso Select
+6: Polygonal Lasso Select
+7: Magnetic Lasso Select
+9: Magic Wand
+8: Quick Selection
+3: Object Selection
+10: Crop Tool
+11: Perspective Crop
+12: Slice Tool
+13: Slice Select Tool
+14: Eyedropper
+15: Color Sampler
+16: Ruler
+18: Spot Healing Brush Tool
+19: Healing Brush Tool
+90: Magic Replace
+20: Patch Tool
+21: Content-Aware Move Tool
+22: Red Eye Tool
+23: Brush Tool
+24: Pencil Tool
+25: Color Replacement
+27: Clone Tool
+31: Eraser Tool
+32: Background Eraser
+33: Magic Eraser
+34: Gradient Tool
+35: Paint Bucket Tool
+36: Blur Tool
+37: Sharpen Tool
+38: Smudge Tool
+39: Dodge Tool
+40: Burn Tool
+41: Sponge Tool
+47: Type Tool
+48: Vertical Type Tool
+42: Pen
+43: Free Pen
+44: Curvature Pen
+45: Add Anchor Point
+46: Delete Anchor Point
+72: Convert Point
+51: Path Select
+52: Direct Select
+54: Rectangle
+55: Ellipse
+57: Line
+56: Parametric Shape
+58: Custom Shape
+59: Hand Tool
+60: Rotate View
+61: Zoom Tool

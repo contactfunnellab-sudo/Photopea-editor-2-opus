@@ -1,0 +1,201 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <title>Photopea Runner</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #111; }
+    #pp { width: 100%; height: 100%; border: 0; }
+  </style>
+</head>
+<body>
+  <iframe id="pp" src="https://www.photopea.com"></iframe>
+<script>
+const frame = document.getElementById('pp');
+
+function toBase64(buffer) {
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  const chunk = 8192;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  }
+  return btoa(binary);
+}
+
+async function postAndWait(message, options = {}) {
+  const expectBinary = Boolean(options.expectBinary);
+  const timeoutMs = options.timeoutMs || 120000;
+  const transfer = options.transfer || [];
+
+  return new Promise((resolve, reject) => {
+    let binaryPayload = null;
+    let lastMessagePayload = null;
+    const timer = setTimeout(() => {
+      window.removeEventListener('message', onMsg);
+      reject(new Error('Timed out waiting for Photopea response'));
+    }, timeoutMs);
+
+    function onMsg(e) {
+      if (e.source !== frame.contentWindow) return;
+      if (expectBinary && e.data instanceof ArrayBuffer) {
+        binaryPayload = e.data;
+        return;
+      }
+      if (e.data !== 'done') {
+        lastMessagePayload = e.data;
+      }
+      if (e.data === 'done') {
+        clearTimeout(timer);
+        window.removeEventListener('message', onMsg);
+        resolve(expectBinary ? binaryPayload : lastMessagePayload);
+      }
+    }
+
+    window.addEventListener('message', onMsg);
+    frame.contentWindow.postMessage(message, '*', transfer);
+  });
+}
+
+async function waitUntilReady() {
+  await postAndWait('app.echoToOE("ready")');
+}
+
+async function waitForDocumentCount(minCount) {
+  const start = Date.now();
+  while (Date.now() - start < 120000) {
+    const countResult = await postAndWait('app.echoToOE(String(app.documents.length))');
+    if (Number(countResult) >= minCount) return;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  throw new Error(`Timed out waiting for ${minCount} documents to load.`);
+}
+
+async function fetchBinary(url) {
+  const res = await fetch(url, { cache: 'no-store' });
+  if (!res.ok) {
+    throw new Error(`Failed to fetch file (${res.status}): ${url}`);
+  }
+  return await res.arrayBuffer();
+}
+
+async function dropFilesIntoPhotopea(baseImageUrl, referenceImageUrl) {
+  const [baseBuffer, referenceBuffer] = await Promise.all([
+    fetchBinary(baseImageUrl),
+    fetchBinary(referenceImageUrl)
+  ]);
+
+  await postAndWait(baseBuffer, { transfer: [baseBuffer] });
+  await waitForDocumentCount(1);
+
+  await postAndWait(referenceBuffer, { transfer: [referenceBuffer] });
+  await waitForDocumentCount(2);
+}
+
+function buildStackScript() {
+  return `
+function layerPixelSize(lyr) {
+  var b = lyr.bounds;
+  return {
+    w: Number(b[2]) - Number(b[0]),
+    h: Number(b[3]) - Number(b[1])
+  };
+}
+
+var base = app.documents[0];
+var ref = app.documents[1];
+if(!base || !ref){ throw new Error('Expected two documents after file drop.'); }
+
+var targetW = Number(ref.width);
+var targetH = Number(ref.height);
+
+app.activeDocument = ref;
+ref.selection.selectAll();
+ref.selection.copy();
+
+app.activeDocument = base;
+base.paste();
+var refLayer = base.activeLayer;
+refLayer.name = 'Reference Above';
+
+var currentSize = layerPixelSize(refLayer);
+if (currentSize.w > 0 && currentSize.h > 0) {
+  var scaleX = (targetW / currentSize.w) * 100;
+  var scaleY = (targetH / currentSize.h) * 100;
+  refLayer.resize(scaleX, scaleY);
+}
+
+app.activeDocument = ref;
+ref.close(SaveOptions.DONOTSAVECHANGES);
+app.activeDocument = base;
+`;
+}
+
+function buildEditScript({ offsetX, offsetY, scalePct }) {
+  return `
+var doc = app.activeDocument;
+if(!doc){ throw new Error('No active document to edit.'); }
+var refLayer = doc.activeLayer;
+if(!refLayer){ throw new Error('No active reference layer found.'); }
+
+function ellipsePoints(cx, cy, rx, ry) {
+  var pts = [];
+  var steps = 36;
+  for (var i = 0; i < steps; i++) {
+    var t = (Math.PI * 2 * i) / steps;
+    pts.push([cx + Math.cos(t) * rx, cy + Math.sin(t) * ry]);
+  }
+  return pts;
+}
+
+var w = Number(doc.width);
+var h = Number(doc.height);
+
+// Sample-specific target: right-most girl eyes only
+var leftEyeX = w * 0.64;
+var rightEyeX = w * 0.74;
+var eyeY = h * 0.44;
+var eyeRX = w * 0.05;
+var eyeRY = h * 0.04;
+
+var leftEyeSel = ellipsePoints(leftEyeX, eyeY, eyeRX, eyeRY);
+var rightEyeSel = ellipsePoints(rightEyeX, eyeY, eyeRX, eyeRY);
+
+doc.selection.select(leftEyeSel);
+doc.selection.select(rightEyeSel, SelectionType.EXTEND);
+
+// Slightly feather edge so eye cutout keeps more natural contour
+try { doc.selection.feather(1); } catch(e) {}
+
+doc.selection.copy();
+doc.paste();
+var eyesLayer = doc.activeLayer;
+eyesLayer.name = 'Eyes Cutout';
+
+// Keep intact by default, but allow manual tuning from UI
+if (${scalePct} !== 100) {
+  eyesLayer.resize(${scalePct}, ${scalePct});
+}
+if (${offsetX} !== 0 || ${offsetY} !== 0) {
+  eyesLayer.translate(${offsetX}, ${offsetY});
+}
+`;
+}
+
+window.runAutomation = async function runAutomation(payload) {
+  await waitUntilReady();
+  await dropFilesIntoPhotopea(payload.baseImageUrl, payload.referenceImageUrl);
+  await postAndWait(buildStackScript());
+  await postAndWait(buildEditScript(payload));
+
+  const imageBinary = await postAndWait(`app.activeDocument.saveToOE("${payload.exportFormat}")`, { expectBinary: true });
+  const psdBinary = await postAndWait('app.activeDocument.saveToOE("psd")', { expectBinary: true });
+
+  return {
+    imageBase64: toBase64(imageBinary),
+    psdBase64: toBase64(psdBinary)
+  };
+};
+</script>
+</body>
+</html>

@@ -1,0 +1,44 @@
+Live Messaging
+You can insert Photopea into a webpage (using a frame). Let's call such webpage the Outer Environment (OE). OE can communicate with Photopea through Web Messaging.
+
+window.addEventListener("message", function(e) { alert(e.data); });
+var wnd = document.getElementById("pp").contentWindow;
+wnd.postMessage(msg, "*");
+OE can send two kinds of data to Photopea:
+
+String - contains a script, which will be executed by Photopea
+ArrayBuffer - a binary file: psd, svg, jpg, ... fonts, brushes, ...
+When Photopea is initialized and ready to accept commands, it sends the message "done". After your message is processed, Photopea also sends back the message "done".
+
+Some demos of live messsaging in Photopea: Demo 1 Demo 2 Demo 3
+
+Retrieving data from Photopea
+Photopea can send the current image to OE using the following command (inside a script):
+
+app.activeDocument.saveToOE("gif");
+After you run the script above, PP will send a message with an ArrayBuffer of a GIF image, followed by a message with a String "done" (processing the script has finished).
+
+It can also send any String to OE using the following command (inside a script):
+
+app.echoToOE("Hello");
+The full description at /learn/scripts.
+
+Examples of usage
+This API can replace the main API. Instad of letting Photopea communicate with your server directly, you can load files inside your progrm and transfer them to and from Photopea in a clients device.
+
+You can use Photopea as a "module", hide its UI and use only the messaging. You can create a batch-processor of images (resizing images, adding watermarks, converting between formats). You can make scripts, that would export each layer of the document as a PNG. You can make scripts, that would replace the text in each text layer by data from your user (to create a generator of business cards, etc.).
+
+Example: Integrating with a custom storage
+We can redefine the default behaviour of File - Open and File - Save.
+
+We can send Photopea any image in a message as ArrayBuffer
+We can call app.activeDocument.saveToOE("psd"); to send the current file to OE.
+We can call app.echoToOE("Hello"); to send any string to OE.
+We can read and write app.activeDocument.source String to identify files.
+We can set custom scripts to run after pressing Open or Save: customIO : open, save
+Now, we can do following:
+
+Set custom scripts to app.echoToOE("Open" / "Save"); to be notified, when the user presses the buttons.
+When the user wants to Open a file, show him your own file input (you can even let the user draw something, or take a picture of him).
+Once you have the image (ArrayBuffer), send it to Photopea and set the source: app.activeDocument.source="myID2353".
+When the user wants to Save a file, read the file (app.activeDocument.saveToOE("psd");) and its source app.echoToOE(app.activeDocument.source);, and save the new version into your storage.
