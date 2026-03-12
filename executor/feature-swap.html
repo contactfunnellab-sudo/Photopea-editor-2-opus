@@ -1,0 +1,237 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <title>Feature Swap Executor</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #111; }
+    #pp { width: 100%; height: 100%; border: 0; }
+  </style>
+</head>
+<body>
+  <iframe id="pp" src="https://www.photopea.com"></iframe>
+<script>
+const frame = document.getElementById('pp');
+
+function toBase64(buffer) {
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  const chunk = 8192;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  }
+  return btoa(binary);
+}
+
+async function postAndWait(message, options) {
+  const opts = options || {};
+  const expectBinary = Boolean(opts.expectBinary);
+  const timeoutMs = opts.timeoutMs || 120000;
+  const transfer = opts.transfer || [];
+
+  return new Promise(function(resolve, reject) {
+    var binaryPayload = null;
+    var lastPayload = null;
+    var timer = setTimeout(function() {
+      window.removeEventListener('message', onMsg);
+      reject(new Error('Timed out waiting for Photopea'));
+    }, timeoutMs);
+
+    function onMsg(e) {
+      if (e.source !== frame.contentWindow) return;
+      if (expectBinary && e.data instanceof ArrayBuffer) {
+        binaryPayload = e.data;
+        return;
+      }
+      if (e.data !== 'done') {
+        lastPayload = e.data;
+      }
+      if (e.data === 'done') {
+        clearTimeout(timer);
+        window.removeEventListener('message', onMsg);
+        resolve(expectBinary ? binaryPayload : lastPayload);
+      }
+    }
+
+    window.addEventListener('message', onMsg);
+    frame.contentWindow.postMessage(message, '*', transfer);
+  });
+}
+
+async function waitUntilReady() {
+  await postAndWait('app.echoToOE("ready")');
+}
+
+async function waitForDocumentCount(minCount) {
+  var start = Date.now();
+  while (Date.now() - start < 120000) {
+    var result = await postAndWait('app.echoToOE(String(app.documents.length))');
+    if (Number(result) >= minCount) return;
+    await new Promise(function(r) { setTimeout(r, 250); });
+  }
+  throw new Error('Timed out waiting for ' + minCount + ' documents');
+}
+
+async function fetchBinary(url) {
+  var res = await fetch(url, { cache: 'no-store' });
+  if (!res.ok) throw new Error('Failed to fetch (' + res.status + '): ' + url);
+  return await res.arrayBuffer();
+}
+
+// Load both images into Photopea as separate documents
+async function loadImages(baseUrl, refUrl) {
+  var baseBuf = await fetchBinary(baseUrl);
+  await postAndWait(baseBuf, { transfer: [baseBuf] });
+  await waitForDocumentCount(1);
+
+  var refBuf = await fetchBinary(refUrl);
+  await postAndWait(refBuf, { transfer: [refBuf] });
+  await waitForDocumentCount(2);
+}
+
+// Stack reference onto base as a layer, close reference doc
+function buildStackScript() {
+  return [
+    'function layerSize(lyr) {',
+    '  var b = lyr.bounds;',
+    '  return { w: Number(b[2]) - Number(b[0]), h: Number(b[3]) - Number(b[1]) };',
+    '}',
+    'var base = app.documents[0];',
+    'var ref  = app.documents[1];',
+    'if (!base || !ref) throw new Error("Expected two documents.");',
+    'var refW = Number(ref.width);',
+    'var refH = Number(ref.height);',
+    'app.activeDocument = ref;',
+    'ref.selection.selectAll();',
+    'ref.selection.copy();',
+    'app.activeDocument = base;',
+    'base.paste();',
+    'var refLayer = base.activeLayer;',
+    'refLayer.name = "Reference";',
+    'var sz = layerSize(refLayer);',
+    'if (sz.w > 0 && sz.h > 0) {',
+    '  refLayer.resize((refW / sz.w) * 100, (refH / sz.h) * 100);',
+    '}',
+    'app.activeDocument = ref;',
+    'ref.close(SaveOptions.DONOTSAVECHANGES);',
+    'app.activeDocument = base;',
+    'app.echoToOE("stacked");'
+  ].join('\n');
+}
+
+// Build parameterized feature extraction script from region coordinates
+function buildFeatureSwapScript(featureRegions, featherRadius) {
+  var regionLines = '';
+  for (var i = 0; i < featureRegions.length; i++) {
+    var r = featureRegions[i];
+    var cx = r.srcX + r.srcWidth / 2;
+    var cy = r.srcY + r.srcHeight / 2;
+    var rx = r.srcWidth / 2;
+    var ry = r.srcHeight / 2;
+    regionLines += 'regions.push({cx:' + cx + ',cy:' + cy +
+      ',rx:' + rx + ',ry:' + ry +
+      ',dx:' + ((r.tgtX !== undefined ? r.tgtX : r.srcX) - r.srcX) +
+      ',dy:' + ((r.tgtY !== undefined ? r.tgtY : r.srcY) - r.srcY) + '});\n';
+  }
+
+  return [
+    'var doc = app.activeDocument;',
+    'var refLayer = null;',
+    'for (var i = 0; i < doc.layers.length; i++) {',
+    '  if (doc.layers[i].name === "Reference") { refLayer = doc.layers[i]; break; }',
+    '}',
+    'if (!refLayer) throw new Error("Reference layer not found");',
+    '',
+    'function ellipse(cx, cy, rx, ry) {',
+    '  var pts = [], steps = 48;',
+    '  for (var i = 0; i < steps; i++) {',
+    '    var t = (Math.PI * 2 * i) / steps;',
+    '    pts.push([cx + Math.cos(t) * rx, cy + Math.sin(t) * ry]);',
+    '  }',
+    '  return pts;',
+    '}',
+    '',
+    'var regions = [];',
+    regionLines,
+    'doc.activeLayer = refLayer;',
+    '',
+    'for (var r = 0; r < regions.length; r++) {',
+    '  var reg = regions[r];',
+    '  var pts = ellipse(reg.cx, reg.cy, reg.rx, reg.ry);',
+    '  if (r === 0) { doc.selection.select(pts); }',
+    '  else { doc.selection.select(pts, SelectionType.EXTEND); }',
+    '}',
+    '',
+    'try { doc.selection.feather(' + featherRadius + '); } catch(e) {}',
+    '',
+    'doc.selection.copy();',
+    'doc.paste();',
+    'var feat = doc.activeLayer;',
+    'feat.name = "Feature Swap";',
+    '',
+    'var dx = regions[0].dx;',
+    'var dy = regions[0].dy;',
+    'if (dx !== 0 || dy !== 0) feat.translate(dx, dy);',
+    '',
+    'refLayer.visible = false;',
+    'doc.selection.deselect();',
+    'app.echoToOE("swapped");'
+  ].join('\n');
+}
+
+// Cleanup: close all open documents
+window.cleanup = async function() {
+  try {
+    await postAndWait(
+      'while(app.documents.length>0){app.activeDocument.close(SaveOptions.DONOTSAVECHANGES);}app.echoToOE("cleaned");'
+    );
+  } catch(e) { /* ok */ }
+};
+
+// Main automation entry point — called from Playwright by executor/server.js
+window.runFeatureSwap = async function(payload) {
+  var logs = [];
+  var t0 = Date.now();
+
+  logs.push('Waiting for Photopea...');
+  await waitUntilReady();
+  logs.push('Photopea ready (' + (Date.now() - t0) + 'ms)');
+
+  logs.push('Loading images...');
+  await loadImages(payload.baseImageUrl, payload.referenceImageUrl);
+  logs.push('Images loaded (' + (Date.now() - t0) + 'ms)');
+
+  logs.push('Stacking reference onto base...');
+  await postAndWait(buildStackScript());
+  logs.push('Stacked (' + (Date.now() - t0) + 'ms)');
+
+  var regionCount = payload.featureRegions.length;
+  logs.push('Executing feature swap (' + regionCount + ' region' + (regionCount > 1 ? 's' : '') + ')...');
+  await postAndWait(buildFeatureSwapScript(payload.featureRegions, payload.featherRadius || 12));
+  logs.push('Feature swap complete (' + (Date.now() - t0) + 'ms)');
+
+  var fmt = payload.exportFormat || 'png';
+  logs.push('Exporting as ' + fmt + '...');
+  var imageBinary = await postAndWait(
+    'app.activeDocument.saveToOE("' + fmt + '")',
+    { expectBinary: true }
+  );
+  logs.push('Image exported (' + (Date.now() - t0) + 'ms)');
+
+  logs.push('Exporting PSD...');
+  var psdBinary = await postAndWait(
+    'app.activeDocument.saveToOE("psd:true")',
+    { expectBinary: true }
+  );
+  logs.push('PSD exported (' + (Date.now() - t0) + 'ms)');
+
+  return {
+    imageBase64: toBase64(imageBinary),
+    psdBase64: toBase64(psdBinary),
+    logs: logs,
+    durationMs: Date.now() - t0
+  };
+};
+</script>
+</body>
+</html>
