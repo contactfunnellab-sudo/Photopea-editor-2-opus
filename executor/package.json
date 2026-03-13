@@ -1,7 +1,7 @@
 {
-  "name": "photopea-feature-swap-executor",
-  "version": "0.1.0",
-  "description": "Deterministic Photopea-based feature swap executor for the PS Request Fulfiller MVP",
+  "name": "photopea-primitive-editor",
+  "version": "0.2.0",
+  "description": "Deterministic Photopea-based primitive editor with MediaPipe face landmarks",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -9,6 +9,9 @@
   },
   "dependencies": {
     "express": "^4.18.0",
-    "playwright": "^1.40.0"
+    "playwright": "^1.40.0",
+    "@tensorflow/tfjs-node": "^4.17.0",
+    "@tensorflow-models/face-landmarks-detection": "^1.0.0",
+    "sharp": "^0.33.0"
   }
 }

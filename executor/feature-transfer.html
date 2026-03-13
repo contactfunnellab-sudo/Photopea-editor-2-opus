@@ -1,0 +1,240 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <title>Feature Transfer Executor (Path-Based)</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #111; }
+    #pp { width: 100%; height: 100%; border: 0; }
+  </style>
+</head>
+<body>
+  <iframe id="pp" src="https://www.photopea.com"></iframe>
+<script>
+var frame = document.getElementById('pp');
+
+function toBase64(buffer) {
+  var bytes = new Uint8Array(buffer);
+  var binary = '';
+  var chunk = 8192;
+  for (var i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+  }
+  return btoa(binary);
+}
+
+function postAndWait(message, options) {
+  var opts = options || {};
+  var expectBinary = Boolean(opts.expectBinary);
+  var timeoutMs = opts.timeoutMs || 120000;
+  var transfer = opts.transfer || [];
+
+  return new Promise(function(resolve, reject) {
+    var binaryPayload = null;
+    var lastPayload = null;
+    var timer = setTimeout(function() {
+      window.removeEventListener('message', onMsg);
+      reject(new Error('Timed out waiting for Photopea'));
+    }, timeoutMs);
+
+    function onMsg(e) {
+      if (e.source !== frame.contentWindow) return;
+      if (expectBinary && e.data instanceof ArrayBuffer) {
+        binaryPayload = e.data;
+        return;
+      }
+      if (e.data !== 'done') {
+        lastPayload = e.data;
+      }
+      if (e.data === 'done') {
+        clearTimeout(timer);
+        window.removeEventListener('message', onMsg);
+        resolve(expectBinary ? binaryPayload : lastPayload);
+      }
+    }
+
+    window.addEventListener('message', onMsg);
+    frame.contentWindow.postMessage(message, '*', transfer);
+  });
+}
+
+function waitUntilReady() {
+  return postAndWait('app.echoToOE("ready")');
+}
+
+function waitForDocumentCount(minCount) {
+  var start = Date.now();
+  function check() {
+    if (Date.now() - start > 120000) {
+      return Promise.reject(new Error('Timed out waiting for ' + minCount + ' documents'));
+    }
+    return postAndWait('app.echoToOE(String(app.documents.length))').then(function(result) {
+      if (Number(result) >= minCount) return;
+      return new Promise(function(r) { setTimeout(r, 250); }).then(check);
+    });
+  }
+  return check();
+}
+
+function fetchBinary(url) {
+  return fetch(url, { cache: 'no-store' }).then(function(res) {
+    if (!res.ok) throw new Error('Failed to fetch (' + res.status + '): ' + url);
+    return res.arrayBuffer();
+  });
+}
+
+function loadImages(baseUrl, refUrl) {
+  return fetchBinary(baseUrl).then(function(baseBuf) {
+    return postAndWait(baseBuf, { transfer: [baseBuf] });
+  }).then(function() {
+    return waitForDocumentCount(1);
+  }).then(function() {
+    return fetchBinary(refUrl);
+  }).then(function(refBuf) {
+    return postAndWait(refBuf, { transfer: [refBuf] });
+  }).then(function() {
+    return waitForDocumentCount(2);
+  });
+}
+
+function buildStackScript() {
+  return [
+    'function layerSize(lyr) {',
+    '  var b = lyr.bounds;',
+    '  return { w: Number(b[2]) - Number(b[0]), h: Number(b[3]) - Number(b[1]) };',
+    '}',
+    'var base = app.documents[0];',
+    'var ref  = app.documents[1];',
+    'if (!base || !ref) throw new Error("Expected two documents.");',
+    'var refW = Number(ref.width);',
+    'var refH = Number(ref.height);',
+    'app.activeDocument = ref;',
+    'ref.selection.selectAll();',
+    'ref.selection.copy();',
+    'app.activeDocument = base;',
+    'base.paste();',
+    'var refLayer = base.activeLayer;',
+    'refLayer.name = "Reference";',
+    'var sz = layerSize(refLayer);',
+    'if (sz.w > 0 && sz.h > 0) {',
+    '  refLayer.resize((refW / sz.w) * 100, (refH / sz.h) * 100);',
+    '}',
+    'app.activeDocument = ref;',
+    'ref.close(SaveOptions.DONOTSAVECHANGES);',
+    'app.activeDocument = base;',
+    'app.echoToOE("stacked");'
+  ].join('\n');
+}
+
+/**
+ * Build Photopea script for path-based feature transfer.
+ * Each primitive is executed SEPARATELY — not merged.
+ * Each feature gets its own layer.
+ *
+ * V1 = polygon path selection (doc.selection.select with point arrays).
+ */
+function buildPathTransferScript(selectionPrimitives) {
+  var script = [
+    'var doc = app.activeDocument;',
+    'var refLayer = null;',
+    'for (var i = 0; i < doc.layers.length; i++) {',
+    '  if (doc.layers[i].name === "Reference") { refLayer = doc.layers[i]; break; }',
+    '}',
+    'if (!refLayer) throw new Error("Reference layer not found");',
+    ''
+  ];
+
+  for (var p = 0; p < selectionPrimitives.length; p++) {
+    var prim = selectionPrimitives[p];
+    var label = prim.label || ('feature_' + p);
+    var feather = (prim.blend && prim.blend.featherRadius) || 5;
+    var srcPoints = JSON.stringify(prim.source.points);
+    var tx = (prim.placementTransform && prim.placementTransform.translateX) || 0;
+    var ty = (prim.placementTransform && prim.placementTransform.translateY) || 0;
+
+    script.push('// Feature ' + p + ': ' + label);
+    script.push('doc.activeLayer = refLayer;');
+    script.push('doc.selection.select(' + srcPoints + ');');
+    script.push('try { doc.selection.feather(' + feather + '); } catch(e) {}');
+    script.push('doc.selection.copy();');
+    script.push('doc.paste();');
+    script.push('var feat' + p + ' = doc.activeLayer;');
+    script.push('feat' + p + '.name = "Feature: ' + label.replace(/"/g, '\\"') + '";');
+
+    if (tx !== 0 || ty !== 0) {
+      script.push('feat' + p + '.translate(' + Math.round(tx * 10) / 10 + ', ' + Math.round(ty * 10) / 10 + ');');
+    }
+
+    script.push('doc.selection.deselect();');
+    script.push('');
+  }
+
+  script.push('refLayer.visible = false;');
+  script.push('app.echoToOE("transferred");');
+
+  return script.join('\n');
+}
+
+window.cleanup = function() {
+  return postAndWait(
+    'while(app.documents.length>0){app.activeDocument.close(SaveOptions.DONOTSAVECHANGES);}app.echoToOE("cleaned");'
+  ).catch(function() {});
+};
+
+/**
+ * Main entry point — called from Playwright by executor/server.js
+ *
+ * payload: {
+ *   baseImageUrl, referenceImageUrl,
+ *   selectionPrimitives: [{ type, label, source: {points}, target: {points}, placementTransform, blend }],
+ *   exportFormat, debugExport
+ * }
+ */
+window.runFeatureTransfer = function(payload) {
+  var logs = [];
+  var t0 = Date.now();
+
+  logs.push('Waiting for Photopea...');
+  return waitUntilReady().then(function() {
+    logs.push('Photopea ready (' + (Date.now() - t0) + 'ms)');
+    logs.push('Loading images...');
+    return loadImages(payload.baseImageUrl, payload.referenceImageUrl);
+  }).then(function() {
+    logs.push('Images loaded (' + (Date.now() - t0) + 'ms)');
+    logs.push('Stacking reference onto base...');
+    return postAndWait(buildStackScript());
+  }).then(function() {
+    logs.push('Stacked (' + (Date.now() - t0) + 'ms)');
+    var count = payload.selectionPrimitives.length;
+    logs.push('Executing path-based transfer (' + count + ' primitive' + (count > 1 ? 's' : '') + ')...');
+    return postAndWait(buildPathTransferScript(payload.selectionPrimitives));
+  }).then(function() {
+    logs.push('Transfer complete (' + (Date.now() - t0) + 'ms)');
+    var fmt = payload.exportFormat || 'png';
+    logs.push('Exporting as ' + fmt + '...');
+    return postAndWait('app.activeDocument.saveToOE("' + fmt + '")', { expectBinary: true });
+  }).then(function(imageBinary) {
+    logs.push('Image exported (' + (Date.now() - t0) + 'ms)');
+    var result = {
+      imageBase64: toBase64(imageBinary),
+      psdBase64: null,
+      logs: logs,
+      durationMs: Date.now() - t0
+    };
+
+    if (payload.debugExport !== false) {
+      logs.push('Exporting PSD (debug)...');
+      return postAndWait('app.activeDocument.saveToOE("psd:true")', { expectBinary: true }).then(function(psdBinary) {
+        result.psdBase64 = toBase64(psdBinary);
+        logs.push('PSD exported (' + (Date.now() - t0) + 'ms)');
+        result.logs = logs;
+        result.durationMs = Date.now() - t0;
+        return result;
+      });
+    }
+    return result;
+  });
+};
+</script>
+</body>
+</html>

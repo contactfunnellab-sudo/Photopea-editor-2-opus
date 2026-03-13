@@ -1,0 +1,35 @@
+---
+name: combine_swap
+version: 2
+description: "Same-person feature transfer routing. Reference detection and feature swap planning."
+---
+
+# Combine & Swap — Primitive Rules
+
+## When This Category Applies
+
+- Request mentions combining features from multiple photos
+- Request mentions "use X from photo 2" or "swap the eyes/smile"
+- Same person, different expressions or moments
+
+## Routing Rules
+
+1. Same person + specific facial feature mentioned → feature_transfer with face_landmarks
+2. Same person + "use the expression from the other shot" → feature_transfer with appropriate features
+3. Different person face swap → REJECT (not supported in this editor)
+4. Full head replacement → REJECT (not supported)
+
+## Reference Detection
+
+The Brain must determine samePersonReference: true/false.
+- Same person = same face in different shots (photo burst, different moment)
+- Different person = different identity entirely
+
+Only samePersonReference: true is supported.
+
+## Feature Transfer Planning
+
+- Identify which features need to transfer
+- Set separatePerFeature: true for independent feature regions
+- Choose blend settings per feature type
+- Set targetFaceHint for multi-face disambiguation

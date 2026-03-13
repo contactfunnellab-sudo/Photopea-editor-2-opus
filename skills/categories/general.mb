@@ -1,0 +1,36 @@
+---
+name: general
+version: 2
+description: "Fallback and rejection rules for unsupported requests."
+---
+
+# General — Rejection & Fallback Rules
+
+## Default Behavior
+
+If the request does not clearly match face_body_fix or combine_swap categories, check:
+
+1. Is it a same-person multi-image feature fix? → Route to face_body_fix
+2. Is it a same-person combine/swap? → Route to combine_swap
+3. Everything else → REJECT as unsupported
+
+## Unsupported Request Types
+
+Set supported: false with clear skipReason for:
+- Single image edits (no reference available)
+- Background changes
+- Object removal or addition
+- Text / logo changes
+- Color correction only
+- Creative / artistic edits
+- AI generation requests
+- Different-person swaps
+- Body-level edits
+- Hair / clothing edits
+
+## Fallback Primitives
+
+box_fallback and ellipse_fallback are available but should only be used when:
+- The request is supported BUT no landmark detector applies
+- The region is simple and geometric (rare for facial features)
+- These are last-resort options, not defaults
