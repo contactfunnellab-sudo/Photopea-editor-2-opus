@@ -1,0 +1,46 @@
+---
+name: face_body_fix
+version: 2
+description: "Face landmark-based feature transfer. Eye repair, expression fix, brow correction."
+---
+
+# Face & Body Fix — Primitive Rules
+
+## When This Category Applies
+
+- Request targets facial features: eyes, mouth, brows, expression
+- Same person appears in 2+ images
+- One image has the desired feature, another has the problem
+
+## Feature → Landmark Mapping
+
+| Request Target | primitiveType | features |
+|---------------|--------------|----------|
+| Blinking / closed eyes | face_landmarks | ["left_eye", "right_eye"] |
+| One eye closed | face_landmarks | ["left_eye"] or ["right_eye"] |
+| Wrong smile / mouth | face_landmarks | ["lips"] |
+| Eyebrow fix | face_landmarks | ["left_eyebrow", "right_eyebrow"] |
+| Full expression | face_landmarks | ["left_eye", "right_eye", "lips"] |
+
+## Per-Eye Separation Rule
+
+For eye repair, ALWAYS request left_eye and right_eye as SEPARATE features with separatePerFeature: true. Do NOT merge both eyes into one region.
+
+## Base vs Reference
+
+- BASE = the image with the problem (blinking, wrong expression)
+- REFERENCE = the image with the desired feature (open eyes, correct smile)
+- The Brain identifies which is which from the request text and image analysis
+
+## Blend Defaults
+
+- Eyes: featherRadius 5, expandPx 2, smoothPx 1 (preserve corners, very light smoothing)
+- Brows: featherRadius 5, expandPx 2, smoothPx 1 (light smoothing)
+- Lips: featherRadius 7, expandPx 3, smoothPx 2 (moderate smoothing)
+
+## Quality Constraints
+
+- Real pixel transfer only — no AI generation
+- Each feature gets its own layer in the output PSD
+- Reference layer preserved (hidden) for debugging
+- Untouched pixels must remain pixel-identical to base

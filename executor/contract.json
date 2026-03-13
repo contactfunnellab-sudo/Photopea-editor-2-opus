@@ -1,141 +1,234 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Feature Swap Executor Contract v1",
-  "description": "Input/output contract for the Photopea feature_swap executor. The executor is deterministic — no LLM calls, no AI generation. It takes structured coordinates and performs pixel-level feature transfer using Photopea scripting.",
-  "input": {
+  "title": "Photopea Primitive Editor Contract v2",
+  "description": "Input/output contract for the Photopea primitive-based executor. Supports polygon_path (v1), ellipse, and box selection types. Fully deterministic — no LLM calls in execution.",
+
+  "featureTransferInput": {
     "type": "object",
-    "required": ["baseImageUrl", "referenceImageUrl", "photopeaOp", "featureRegions"],
+    "required": ["baseImageUrl", "referenceImageUrl", "photopeaOp", "selectionPrimitives"],
     "properties": {
       "baseImageUrl": {
         "type": "string",
         "format": "uri",
-        "description": "URL of the base image (the image with the problem to fix)"
+        "description": "URL of the base image (has the problem to fix)"
       },
       "referenceImageUrl": {
         "type": "string",
         "format": "uri",
-        "description": "URL of the reference image (the image with the desired feature)"
+        "description": "URL of the reference image (has the desired feature)"
       },
       "photopeaOp": {
         "type": "string",
-        "enum": ["feature_swap"],
-        "description": "Operation to perform. v1 only supports feature_swap."
+        "enum": ["feature_transfer"],
+        "description": "Operation type. v2 uses feature_transfer with selectionPrimitives."
       },
-      "featureRegions": {
+      "selectionPrimitives": {
         "type": "array",
         "minItems": 1,
-        "description": "Array of feature regions to extract from reference and blend onto base. Multiple regions are combined into a single selection (e.g., both eyes).",
+        "description": "Array of selection primitives. Each processed separately (not merged). Each gets its own layer.",
         "items": {
           "type": "object",
-          "required": ["srcX", "srcY", "srcWidth", "srcHeight"],
+          "required": ["type", "label", "source", "target"],
           "properties": {
+            "type": {
+              "type": "string",
+              "enum": ["polygon_path", "ellipse", "box"],
+              "description": "Selection type. V1 default is polygon_path. Future: bezier_path."
+            },
             "label": {
               "type": "string",
-              "description": "Human-readable label for the feature (e.g., 'eyes', 'mouth')"
+              "description": "Feature label (e.g., 'left_eye', 'right_eye', 'lips')"
             },
-            "srcX": {
-              "type": "number",
-              "minimum": 0,
-              "description": "X coordinate of feature bounding box in the REFERENCE image (pixels)"
+            "source": {
+              "type": "object",
+              "required": ["points"],
+              "properties": {
+                "points": {
+                  "type": "array",
+                  "minItems": 3,
+                  "items": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 },
+                  "description": "Path points in reference image. [[x,y], ...] in pixel space."
+                },
+                "pointCount": {
+                  "type": "integer",
+                  "description": "Actual point count (runtime, not hardcoded)"
+                }
+              }
             },
-            "srcY": {
-              "type": "number",
-              "minimum": 0,
-              "description": "Y coordinate of feature bounding box in the REFERENCE image (pixels)"
+            "target": {
+              "type": "object",
+              "required": ["points"],
+              "properties": {
+                "points": {
+                  "type": "array",
+                  "minItems": 3,
+                  "items": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 },
+                  "description": "Path points in base image. [[x,y], ...] in pixel space."
+                },
+                "pointCount": {
+                  "type": "integer",
+                  "description": "Actual point count (runtime, not hardcoded)"
+                }
+              }
             },
-            "srcWidth": {
-              "type": "number",
-              "exclusiveMinimum": 0,
-              "description": "Width of feature bounding box in the REFERENCE image (pixels)"
+            "placementTransform": {
+              "type": "object",
+              "properties": {
+                "translateX": { "type": "number", "default": 0, "description": "Horizontal translation (centroid delta)" },
+                "translateY": { "type": "number", "default": 0, "description": "Vertical translation (centroid delta)" },
+                "rotation": { "type": "number", "default": 0, "description": "Rotation in radians (from anchor pairs)" },
+                "scale": { "type": "number", "default": 1.0, "description": "Uniform scale factor (from anchor pairs)" }
+              }
             },
-            "srcHeight": {
-              "type": "number",
-              "exclusiveMinimum": 0,
-              "description": "Height of feature bounding box in the REFERENCE image (pixels)"
-            },
-            "tgtX": {
-              "type": "number",
-              "minimum": 0,
-              "description": "X coordinate of feature bounding box in the BASE image (pixels). Defaults to srcX if omitted (same-framing assumption)."
-            },
-            "tgtY": {
-              "type": "number",
-              "minimum": 0,
-              "description": "Y coordinate of feature bounding box in the BASE image (pixels). Defaults to srcY if omitted."
-            },
-            "tgtWidth": {
-              "type": "number",
-              "exclusiveMinimum": 0,
-              "description": "Width of feature bounding box in the BASE image (pixels). Defaults to srcWidth if omitted."
-            },
-            "tgtHeight": {
-              "type": "number",
-              "exclusiveMinimum": 0,
-              "description": "Height of feature bounding box in the BASE image (pixels). Defaults to srcHeight if omitted."
+            "blend": {
+              "type": "object",
+              "properties": {
+                "expandPx": { "type": "number", "minimum": 0, "default": 2 },
+                "smoothPx": { "type": "number", "minimum": 0, "default": 1 },
+                "featherRadius": { "type": "number", "minimum": 0, "maximum": 50, "default": 5 }
+              }
             }
           }
         }
-      },
-      "featherRadius": {
-        "type": "number",
-        "minimum": 0,
-        "maximum": 50,
-        "default": 12,
-        "description": "Feather radius in pixels for elliptical mask blending. Controls how soft the transition is between swapped feature and surrounding face."
       },
       "exportFormat": {
         "type": "string",
         "enum": ["png", "jpg", "webp"],
         "default": "png",
-        "description": "Output image format"
+        "description": "Final export format (always produced)"
+      },
+      "debugExport": {
+        "type": "boolean",
+        "default": true,
+        "description": "If true, also export PSD with layers for debugging"
       }
     }
   },
-  "output": {
+
+  "featureTransferOutput": {
     "type": "object",
     "properties": {
-      "success": {
-        "type": "boolean",
-        "description": "Whether the operation completed successfully"
-      },
-      "imageBase64": {
-        "type": "string",
-        "description": "Base64-encoded final edited image"
-      },
-      "psdBase64": {
-        "type": "string",
-        "description": "Base64-encoded PSD file with layers preserved"
-      },
-      "logs": {
+      "success": { "type": "boolean" },
+      "imageBase64": { "type": "string", "description": "Base64-encoded final image (png)" },
+      "psdBase64": { "type": ["string", "null"], "description": "Base64-encoded PSD (if debugExport=true)" },
+      "logs": { "type": "array", "items": { "type": "string" } },
+      "durationMs": { "type": "number" },
+      "error": { "type": "string" }
+    }
+  },
+
+  "primitivesInput": {
+    "type": "object",
+    "required": ["baseImageUrl", "referenceImageUrl", "features"],
+    "properties": {
+      "baseImageUrl": { "type": "string", "format": "uri" },
+      "referenceImageUrl": { "type": "string", "format": "uri" },
+      "features": {
         "type": "array",
-        "items": { "type": "string" },
-        "description": "Structured execution log with timing info"
+        "items": { "type": "string", "enum": ["left_eye", "right_eye", "lips", "left_eyebrow", "right_eyebrow", "face_oval"] }
       },
-      "durationMs": {
-        "type": "number",
-        "description": "Total execution time in milliseconds"
+      "outputMode": { "type": "string", "enum": ["polygon_path"], "default": "polygon_path" },
+      "targetFaceHint": {
+        "type": ["string", "integer"],
+        "description": "'largest', 'leftmost', 'rightmost', or integer face index",
+        "default": "largest"
       },
-      "error": {
-        "type": "string",
-        "description": "Error message if success=false"
+      "includeRawLandmarks": { "type": "boolean", "default": false }
+    }
+  },
+
+  "primitivesOutput": {
+    "type": "object",
+    "properties": {
+      "success": { "type": "boolean" },
+      "primitiveType": { "type": "string" },
+      "imageMeta": {
+        "type": "object",
+        "properties": {
+          "base": { "type": "object", "properties": { "width": { "type": "integer" }, "height": { "type": "integer" } } },
+          "reference": { "type": "object", "properties": { "width": { "type": "integer" }, "height": { "type": "integer" } } }
+        }
+      },
+      "detections": {
+        "type": "object",
+        "properties": {
+          "baseFaces": { "type": "integer" },
+          "referenceFaces": { "type": "integer" },
+          "baseTotalLandmarks": { "type": "integer", "description": "Actual runtime count (not hardcoded)" },
+          "referenceTotalLandmarks": { "type": "integer", "description": "Actual runtime count (not hardcoded)" },
+          "chosenBaseFaceIndex": { "type": "integer" },
+          "chosenReferenceFaceIndex": { "type": "integer" }
+        }
+      },
+      "features": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "name": { "type": "string" },
+            "base": {
+              "type": "object",
+              "properties": {
+                "rawPointCount": { "type": "integer" },
+                "pixelPoints": { "type": "array" },
+                "pathPoints": { "type": "array" }
+              }
+            },
+            "reference": {
+              "type": "object",
+              "properties": {
+                "rawPointCount": { "type": "integer" },
+                "pixelPoints": { "type": "array" },
+                "pathPoints": { "type": "array" }
+              }
+            },
+            "placementTransform": {
+              "type": "object",
+              "properties": {
+                "translateX": { "type": "number" },
+                "translateY": { "type": "number" },
+                "rotation": { "type": "number" },
+                "scale": { "type": "number" }
+              }
+            },
+            "recommendedBlend": {
+              "type": "object",
+              "properties": {
+                "expandPx": { "type": "number" },
+                "smoothPx": { "type": "number" },
+                "featherRadius": { "type": "number" }
+              }
+            }
+          }
+        }
       }
     }
   },
+
+  "futureTypes": {
+    "bezier_path": "Not yet implemented. Will support true Pen-style bezier handles.",
+    "pose_path": "Architecture stub for pose_landmarks primitive.",
+    "mask": "Architecture stub for segment_mask primitive."
+  },
+
   "executionModel": {
-    "description": "The executor is fully deterministic. No LLM calls, no AI generation.",
+    "description": "Fully deterministic. No LLM calls, no AI generation. CPU execution via tfjs-node.",
     "steps": [
       "1. Load base image into Photopea as document[0]",
       "2. Load reference image into Photopea as document[1]",
-      "3. Copy reference content and paste as layer in base document",
-      "4. Scale reference layer to match its original pixel dimensions",
-      "5. Close reference document",
-      "6. For each featureRegion: select elliptical region from reference layer",
-      "7. Feather the combined selection by featherRadius pixels",
-      "8. Copy selection and paste as new 'Feature Swap' layer",
-      "9. If tgt coordinates differ from src, translate the layer",
-      "10. Hide reference layer (preserves it in PSD for debugging)",
-      "11. Export final image in requested format",
-      "12. Export PSD with all layers"
+      "3. Copy reference and paste as layer in base document, scale to match",
+      "4. Close reference document",
+      "5. For EACH selectionPrimitive separately:",
+      "   a. Activate reference layer",
+      "   b. doc.selection.select(primitive.source.points) — polygon path",
+      "   c. doc.selection.feather(blend.featherRadius)",
+      "   d. Copy and paste as new layer",
+      "   e. Name layer 'Feature: {label}'",
+      "   f. Apply placement transform (translate, rotate, scale)",
+      "   g. Deselect",
+      "6. Hide reference layer (preserved in PSD for debug)",
+      "7. Export final png",
+      "8. Export PSD if debugExport=true"
     ]
   }
 }
