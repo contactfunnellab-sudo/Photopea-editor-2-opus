@@ -147,21 +147,29 @@ function buildPathTransferScript(selectionPrimitives) {
   for (var p = 0; p < selectionPrimitives.length; p++) {
     var prim = selectionPrimitives[p];
     var label = prim.label || ('feature_' + p);
-    var feather = (prim.blend && prim.blend.featherRadius) || 5;
+    var feather = (prim.blend && prim.blend.featherRadius !== undefined) ? prim.blend.featherRadius : 2;
+    var opacity = (prim.blend && prim.blend.opacity !== undefined) ? prim.blend.opacity : 100;
     var srcPoints = JSON.stringify(prim.source.points);
     var tx = (prim.placementTransform && prim.placementTransform.translateX) || 0;
     var ty = (prim.placementTransform && prim.placementTransform.translateY) || 0;
     var scale = (prim.placementTransform && prim.placementTransform.scale) || 1.0;
     var rotation = (prim.placementTransform && prim.placementTransform.rotation) || 0;
 
-    script.push('// Feature ' + p + ': ' + label);
+    script.push('// Feature ' + p + ': ' + label + ' (opacity=' + opacity + ', feather=' + feather + ')');
     script.push('doc.activeLayer = refLayer;');
     script.push('doc.selection.select(' + srcPoints + ');');
-    script.push('try { doc.selection.feather(' + feather + '); } catch(e) {}');
+    if (feather > 0) {
+      script.push('try { doc.selection.feather(' + feather + '); } catch(e) {}');
+    }
     script.push('doc.selection.copy();');
     script.push('doc.paste();');
     script.push('var feat' + p + ' = doc.activeLayer;');
     script.push('feat' + p + '.name = "Feature: ' + label.replace(/"/g, '\\"') + '";');
+
+    // Apply layer opacity from blend policy
+    if (opacity < 100) {
+      script.push('feat' + p + '.opacity = ' + opacity + ';');
+    }
 
     // Apply similarity transform: scale first, then rotate, then translate
     if (scale !== 1.0) {
