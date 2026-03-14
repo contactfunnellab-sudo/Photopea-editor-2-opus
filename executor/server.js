@@ -66,6 +66,13 @@ function validatePayload(payload) {
       if (r.srcWidth <= 0 || r.srcHeight <= 0) {
         errors.push('featureRegions[' + i + '] has zero-size region');
       }
+      // tgtX/tgtY: optional for backward compat, but if present must be valid
+      if (r.tgtX !== undefined && (typeof r.tgtX !== 'number' || r.tgtX < 0)) {
+        errors.push('featureRegions[' + i + '].tgtX must be a non-negative number');
+      }
+      if (r.tgtY !== undefined && (typeof r.tgtY !== 'number' || r.tgtY < 0)) {
+        errors.push('featureRegions[' + i + '].tgtY must be a non-negative number');
+      }
     }
   }
 
@@ -121,11 +128,19 @@ app.post('/api/feature-swap', async (req, res) => {
   try {
     const payload = req.body;
 
-    // Defensive logging
-    console.log('[feature-swap] baseImageUrl=' + (payload.baseImageUrl || '').substring(0, 60) +
-      ' | referenceImageUrl=' + (payload.referenceImageUrl || '').substring(0, 60) +
+    // Detailed request logging
+    const reqId = payload.requestId || 'no-id';
+    console.log('[feature-swap] requestId=' + reqId +
+      ' | baseImageUrl=' + (payload.baseImageUrl || '').substring(0, 80) +
+      ' | referenceImageUrl=' + (payload.referenceImageUrl || '').substring(0, 80) +
       ' | regions=' + (Array.isArray(payload.featureRegions) ? payload.featureRegions.length : 0) +
       ' | featherRadius=' + (payload.featherRadius || 12));
+    if (Array.isArray(payload.featureRegions)) {
+      payload.featureRegions.forEach(function(r, i) {
+        console.log('[feature-swap]   region[' + i + '] src=(' + r.srcX + ',' + r.srcY + ' ' + r.srcWidth + 'x' + r.srcHeight + ')' +
+          ' tgt=(' + (r.tgtX !== undefined ? r.tgtX : 'n/a') + ',' + (r.tgtY !== undefined ? r.tgtY : 'n/a') + ')');
+      });
+    }
 
     // Validate against contract
     const errors = validatePayload(payload);
@@ -169,12 +184,18 @@ app.post('/api/feature-swap', async (req, res) => {
     // Clean up documents for next request
     await page.evaluate(function() { return window.cleanup(); }).catch(function() {});
 
+    const durationMs = Date.now() - startTime;
+    const outputBytes = result.imageBase64 ? Math.round(result.imageBase64.length * 3 / 4) : 0;
+    console.log('[feature-swap] SUCCESS requestId=' + reqId +
+      ' | duration=' + durationMs + 'ms' +
+      ' | outputSize=' + Math.round(outputBytes / 1024) + 'KB');
+
     res.json({
       success: true,
       imageBase64: result.imageBase64,
       psdBase64: result.psdBase64,
       logs: result.logs,
-      durationMs: Date.now() - startTime
+      durationMs: durationMs
     });
 
   } catch (error) {
@@ -190,6 +211,61 @@ app.post('/api/feature-swap', async (req, res) => {
       logs: ['EXECUTOR ERROR: ' + error.message],
       durationMs: Date.now() - startTime
     });
+  }
+});
+
+// =============================================
+// Preview Regions — Annotate images with region
+// bounding boxes for visual debugging
+// =============================================
+
+app.post('/api/preview-regions', async (req, res) => {
+  try {
+    const { baseImageUrl, referenceImageUrl, featureRegions, saveTo } = req.body;
+
+    if (!baseImageUrl || !referenceImageUrl) {
+      return res.status(400).json({ success: false, error: 'baseImageUrl and referenceImageUrl are required' });
+    }
+    if (!Array.isArray(featureRegions) || featureRegions.length === 0) {
+      return res.status(400).json({ success: false, error: 'featureRegions must be a non-empty array' });
+    }
+
+    const { renderPreview } = require('./lib/preview');
+
+    // Fetch both images
+    const [baseBuffer, refBuffer] = await Promise.all([
+      fetchImageBuffer(baseImageUrl),
+      fetchImageBuffer(referenceImageUrl)
+    ]);
+
+    // Render annotated previews
+    const [basePreview, refPreview] = await Promise.all([
+      renderPreview(baseBuffer, featureRegions, 'base'),
+      renderPreview(refBuffer, featureRegions, 'reference')
+    ]);
+
+    const result = { success: true };
+
+    // Save to disk if saveTo directory provided
+    if (saveTo) {
+      if (!fs.existsSync(saveTo)) fs.mkdirSync(saveTo, { recursive: true });
+      const basePath = path.join(saveTo, 'preview_base.png');
+      const refPath = path.join(saveTo, 'preview_reference.png');
+      fs.writeFileSync(basePath, basePreview);
+      fs.writeFileSync(refPath, refPreview);
+      result.basePreviewPath = basePath;
+      result.referencePreviewPath = refPath;
+      console.log('[preview] Saved previews to ' + saveTo);
+    }
+
+    // Also return as base64 for inline inspection
+    result.basePreviewBase64 = basePreview.toString('base64');
+    result.referencePreviewBase64 = refPreview.toString('base64');
+
+    res.json(result);
+  } catch (error) {
+    console.error('[preview] ERROR:', error.message);
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
