@@ -20,9 +20,12 @@ app.use(express.static(ROOT));
 
 // Health check
 app.get('/api/health', (_req, res) => {
+  let primitiveBuilderAvailable = false;
+  try { require.resolve('./lib/face-landmarks'); primitiveBuilderAvailable = true; } catch(e) {}
   res.json({
     status: 'ok',
     executorReady: !!(executorPage && !executorPage.isClosed()),
+    primitiveBuilderAvailable: primitiveBuilderAvailable,
     uptime: process.uptime()
   });
 });
@@ -117,6 +120,12 @@ app.post('/api/feature-swap', async (req, res) => {
 
   try {
     const payload = req.body;
+
+    // Defensive logging
+    console.log('[feature-swap] baseImageUrl=' + (payload.baseImageUrl || '').substring(0, 60) +
+      ' | referenceImageUrl=' + (payload.referenceImageUrl || '').substring(0, 60) +
+      ' | regions=' + (Array.isArray(payload.featureRegions) ? payload.featureRegions.length : 0) +
+      ' | featherRadius=' + (payload.featherRadius || 12));
 
     // Validate against contract
     const errors = validatePayload(payload);
