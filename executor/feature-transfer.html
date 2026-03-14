@@ -151,6 +151,8 @@ function buildPathTransferScript(selectionPrimitives) {
     var srcPoints = JSON.stringify(prim.source.points);
     var tx = (prim.placementTransform && prim.placementTransform.translateX) || 0;
     var ty = (prim.placementTransform && prim.placementTransform.translateY) || 0;
+    var scale = (prim.placementTransform && prim.placementTransform.scale) || 1.0;
+    var rotation = (prim.placementTransform && prim.placementTransform.rotation) || 0;
 
     script.push('// Feature ' + p + ': ' + label);
     script.push('doc.activeLayer = refLayer;');
@@ -161,6 +163,15 @@ function buildPathTransferScript(selectionPrimitives) {
     script.push('var feat' + p + ' = doc.activeLayer;');
     script.push('feat' + p + '.name = "Feature: ' + label.replace(/"/g, '\\"') + '";');
 
+    // Apply similarity transform: scale first, then rotate, then translate
+    if (scale !== 1.0) {
+      var pct = Math.round(scale * 100 * 10) / 10;
+      script.push('feat' + p + '.resize(' + pct + ', ' + pct + ', AnchorPosition.MIDDLECENTER);');
+    }
+    if (rotation !== 0) {
+      var deg = Math.round(rotation * 180 / Math.PI * 100) / 100;
+      script.push('feat' + p + '.rotate(' + deg + ', AnchorPosition.MIDDLECENTER);');
+    }
     if (tx !== 0 || ty !== 0) {
       script.push('feat' + p + '.translate(' + Math.round(tx * 10) / 10 + ', ' + Math.round(ty * 10) / 10 + ');');
     }

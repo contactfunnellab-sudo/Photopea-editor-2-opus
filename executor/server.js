@@ -13,19 +13,22 @@ const PORT = process.env.EXECUTOR_PORT || 3000;
 
 let browser = null;
 let executorPage = null;       // legacy feature-swap page
-let transferPage = null;       // new feature-transfer page
+let transferPage = null;       // feature-transfer page (polygon path + transforms)
+let geometryPage = null;       // MediaPipe Face Mesh geometry page
+
+const MEDIAPIPE_DEBUG = process.env.MEDIAPIPE_DEBUG === '1';
 
 // Serve executor HTML and static assets
 app.use(express.static(ROOT));
 
 // Health check
 app.get('/api/health', (_req, res) => {
-  let primitiveBuilderAvailable = false;
-  try { require.resolve('./lib/face-landmarks'); primitiveBuilderAvailable = true; } catch(e) {}
   res.json({
     status: 'ok',
     executorReady: !!(executorPage && !executorPage.isClosed()),
-    primitiveBuilderAvailable: primitiveBuilderAvailable,
+    transferReady: !!(transferPage && !transferPage.isClosed()),
+    geometryReady: !!(geometryPage && !geometryPage.isClosed()),
+    mediapipeDebug: MEDIAPIPE_DEBUG,
     uptime: process.uptime()
   });
 });
@@ -215,19 +218,109 @@ app.post('/api/feature-swap', async (req, res) => {
 });
 
 // =============================================
-// Preview Regions — Annotate images with region
-// bounding boxes for visual debugging
+// MediaPipe Geometry — Browser-side Face Mesh
+// for deterministic eye landmark detection
 // =============================================
 
-app.post('/api/preview-regions', async (req, res) => {
+async function getGeometryPage() {
+  await ensureBrowser();
+  if (!geometryPage || geometryPage.isClosed()) {
+    const context = await browser.newContext();
+    geometryPage = await context.newPage();
+    // Set debug flag before loading page
+    await geometryPage.addInitScript('window.MEDIAPIPE_DEBUG = ' + (MEDIAPIPE_DEBUG ? 'true' : 'false') + ';');
+    await geometryPage.goto(
+      'http://127.0.0.1:' + PORT + '/mediapipe-geometry.html',
+      { waitUntil: 'domcontentloaded' }
+    );
+    // Wait for MediaPipe WASM + model to initialize
+    console.log('[geometry] Waiting for MediaPipe to initialize...');
+    await geometryPage.waitForFunction('window.mediapipeReady === true', { timeout: 120000 });
+    console.log('[geometry] MediaPipe ready.');
+  }
+  return geometryPage;
+}
+
+app.post('/api/geometry/eye-transfer', async (req, res) => {
+  const startTime = Date.now();
   try {
-    const { baseImageUrl, referenceImageUrl, featureRegions, saveTo } = req.body;
+    const { baseImageUrl, referenceImageUrl, targetFaceHint, referenceFaceHint, requestId } = req.body;
+    const reqId = requestId || 'no-id';
 
     if (!baseImageUrl || !referenceImageUrl) {
       return res.status(400).json({ success: false, error: 'baseImageUrl and referenceImageUrl are required' });
     }
-    if (!Array.isArray(featureRegions) || featureRegions.length === 0) {
-      return res.status(400).json({ success: false, error: 'featureRegions must be a non-empty array' });
+
+    console.log('[geometry] requestId=' + reqId +
+      ' | baseUrl=' + (baseImageUrl || '').substring(0, 80) +
+      ' | refUrl=' + (referenceImageUrl || '').substring(0, 80) +
+      ' | baseFaceHint=' + (targetFaceHint || 'largest') +
+      ' | refFaceHint=' + (referenceFaceHint || 'largest') +
+      ' | debug=' + MEDIAPIPE_DEBUG);
+
+    const page = await getGeometryPage();
+
+    const result = await page.evaluate(async function(params) {
+      return window.detectEyeGeometry(
+        params.baseUrl, params.refUrl,
+        params.baseFaceHint, params.refFaceHint
+      );
+    }, {
+      baseUrl: baseImageUrl,
+      refUrl: referenceImageUrl,
+      baseFaceHint: targetFaceHint || 'largest',
+      refFaceHint: referenceFaceHint || 'largest'
+    });
+
+    result.durationMs = Date.now() - startTime;
+
+    if (result.success) {
+      const eg = result.eyeGeometry;
+      const t = eg.transform;
+      console.log('[geometry] SUCCESS requestId=' + reqId +
+        ' | baseFaces=' + result.detections.baseFaces +
+        ' | refFaces=' + result.detections.referenceFaces +
+        ' | chosenBase=' + result.detections.chosenBaseFaceIndex +
+        ' | chosenRef=' + result.detections.chosenReferenceFaceIndex +
+        ' | scale=' + t.scale + ' rot=' + t.rotation + ' tx=' + t.translateX + ' ty=' + t.translateY +
+        ' | confidence=' + eg.confidence +
+        ' | feather=' + eg.featherRadius +
+        ' | srcBox=' + JSON.stringify(eg.source.boundingBox) +
+        ' | tgtBox=' + JSON.stringify(eg.target.boundingBox) +
+        ' | duration=' + result.durationMs + 'ms');
+    } else {
+      console.log('[geometry] FAILED requestId=' + reqId + ' | error=' + result.error +
+        ' | duration=' + result.durationMs + 'ms');
+    }
+
+    res.json(result);
+
+  } catch (error) {
+    // Reset geometry page on failure
+    if (geometryPage && !geometryPage.isClosed()) {
+      geometryPage = null;
+    }
+    const durationMs = Date.now() - startTime;
+    console.error('[geometry] ERROR:', error.message, '| duration=' + durationMs + 'ms');
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      durationMs: durationMs
+    });
+  }
+});
+
+// =============================================
+// Preview Regions — Landmark-aware previews
+// with face detection, eye landmarks, patch boxes
+// =============================================
+
+app.post('/api/preview-regions', async (req, res) => {
+  try {
+    const { baseImageUrl, referenceImageUrl, geometryData, saveTo } = req.body;
+
+    if (!baseImageUrl || !referenceImageUrl) {
+      return res.status(400).json({ success: false, error: 'baseImageUrl and referenceImageUrl are required' });
     }
 
     const { renderPreview } = require('./lib/preview');
@@ -238,10 +331,27 @@ app.post('/api/preview-regions', async (req, res) => {
       fetchImageBuffer(referenceImageUrl)
     ]);
 
+    // Build preview data for each role
+    const gd = geometryData || {};
+    const baseGeoData = {
+      allFaces: gd.allBaseFaces || [],
+      selectedFaceIdx: gd.selectedBaseFaceIdx,
+      eyeLandmarks: gd.baseEyeLandmarks || [],
+      patchBox: gd.targetPatchBox || null,
+      transform: gd.transform || null
+    };
+    const refGeoData = {
+      allFaces: gd.allRefFaces || [],
+      selectedFaceIdx: gd.selectedRefFaceIdx,
+      eyeLandmarks: gd.refEyeLandmarks || [],
+      patchBox: gd.sourcePatchBox || null,
+      transform: null
+    };
+
     // Render annotated previews
     const [basePreview, refPreview] = await Promise.all([
-      renderPreview(baseBuffer, featureRegions, 'base'),
-      renderPreview(refBuffer, featureRegions, 'reference')
+      renderPreview(baseBuffer, 'base', baseGeoData),
+      renderPreview(refBuffer, 'reference', refGeoData)
     ]);
 
     const result = { success: true };
@@ -258,7 +368,6 @@ app.post('/api/preview-regions', async (req, res) => {
       console.log('[preview] Saved previews to ' + saveTo);
     }
 
-    // Also return as base64 for inline inspection
     result.basePreviewBase64 = basePreview.toString('base64');
     result.referencePreviewBase64 = refPreview.toString('base64');
 
@@ -434,6 +543,24 @@ app.post('/api/feature-transfer', async (req, res) => {
   const startTime = Date.now();
   try {
     const payload = req.body;
+    const reqId = payload.requestId || 'no-id';
+
+    // Log transfer request details
+    console.log('[feature-transfer] requestId=' + reqId +
+      ' | baseUrl=' + (payload.baseImageUrl || '').substring(0, 80) +
+      ' | refUrl=' + (payload.referenceImageUrl || '').substring(0, 80) +
+      ' | primitives=' + (Array.isArray(payload.selectionPrimitives) ? payload.selectionPrimitives.length : 0));
+    if (Array.isArray(payload.selectionPrimitives)) {
+      payload.selectionPrimitives.forEach(function(p, i) {
+        const t = p.placementTransform || {};
+        console.log('[feature-transfer]   prim[' + i + '] label=' + (p.label || '?') +
+          ' srcPts=' + (p.source && p.source.points ? p.source.points.length : 0) +
+          ' scale=' + (t.scale || 1) + ' rot=' + (t.rotation || 0) +
+          ' tx=' + (t.translateX || 0) + ' ty=' + (t.translateY || 0) +
+          ' feather=' + (p.blend && p.blend.featherRadius || 'n/a'));
+      });
+    }
+
     const errors = validateTransferPayload(payload);
     if (errors.length > 0) {
       return res.status(400).json({ success: false, errors, logs: ['VALIDATION FAILED: ' + errors.join('; ')] });
@@ -468,12 +595,18 @@ app.post('/api/feature-transfer', async (req, res) => {
 
     await page.evaluate(function() { return window.cleanup(); }).catch(function() {});
 
+    const durationMs = Date.now() - startTime;
+    const outputBytes = result.imageBase64 ? Math.round(result.imageBase64.length * 3 / 4) : 0;
+    console.log('[feature-transfer] SUCCESS requestId=' + reqId +
+      ' | duration=' + durationMs + 'ms' +
+      ' | outputSize=' + Math.round(outputBytes / 1024) + 'KB');
+
     res.json({
       success: true,
       imageBase64: result.imageBase64,
       psdBase64: result.psdBase64 || null,
       logs: result.logs,
-      durationMs: Date.now() - startTime
+      durationMs: durationMs
     });
 
   } catch (error) {
@@ -493,16 +626,21 @@ app.post('/api/feature-transfer', async (req, res) => {
 // =============================================
 
 app.listen(PORT, async () => {
-  console.log('Photopea Primitive Editor running at http://127.0.0.1:' + PORT);
+  console.log('Photopea MVP Executor running at http://127.0.0.1:' + PORT);
   console.log('');
-  console.log('Endpoints:');
-  console.log('  POST /api/primitives/face-landmarks  — detect face landmarks');
-  console.log('  POST /api/primitives/build            — primitive router');
-  console.log('  POST /api/feature-transfer            — path-based Photopea execution');
-  console.log('  POST /api/feature-swap                — legacy ellipse-based execution');
+  console.log('Active MVP Endpoints:');
+  console.log('  POST /api/geometry/eye-transfer       — MediaPipe browser-side eye geometry');
+  console.log('  POST /api/feature-transfer            — path-based Photopea execution (scale+rot)');
+  console.log('  POST /api/preview-regions             — landmark-aware preview rendering');
   console.log('  GET  /api/health                      — health check');
   console.log('');
-  console.log('First run may be slower due to model/backend initialization.');
+  console.log('Legacy/Fallback Endpoints:');
+  console.log('  POST /api/feature-swap                — ellipse-based execution (no transforms)');
+  console.log('  POST /api/primitives/face-landmarks   — tfjs-node landmarks (may fail on Windows)');
+  console.log('  POST /api/primitives/build            — primitive router');
+  console.log('');
+  console.log('MEDIAPIPE_DEBUG=' + (MEDIAPIPE_DEBUG ? 'ON' : 'OFF'));
+  console.log('First run may be slower due to MediaPipe model download.');
   try {
     await ensureBrowser();
     console.log('Browser launched. Ready for requests.');
