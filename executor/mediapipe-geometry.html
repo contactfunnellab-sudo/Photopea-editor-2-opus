@@ -1,0 +1,456 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <title>MediaPipe Eye Geometry — Browser-Side Face Mesh</title>
+  <style>
+    html, body { margin: 0; padding: 20px; background: #111; color: #eee; font-family: monospace; }
+    #status { margin-bottom: 10px; }
+    canvas { border: 1px solid #333; margin: 5px; max-width: 45%; }
+    .debug-container { display: flex; flex-wrap: wrap; gap: 10px; }
+  </style>
+</head>
+<body>
+  <div id="status">Loading MediaPipe Face Mesh...</div>
+  <div id="debug-container" class="debug-container" style="display:none;"></div>
+
+<script type="module">
+// =============================================
+// MediaPipe Face Mesh — Browser-Side Geometry
+// Detects faces + eye landmarks on both images,
+// computes congruent eye geometry + transform.
+// Called from Playwright via window.detectEyeGeometry()
+// =============================================
+
+import { FaceLandmarker, FilesetResolver } from
+  "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.15/vision_bundle.mjs";
+
+// MediaPipe FaceMesh eye landmark indices (same as face-landmarks.js)
+const FEATURE_GROUPS = {
+  left_eye: [33, 246, 161, 160, 159, 158, 157, 173, 133, 155, 154, 153, 145, 144, 163, 7],
+  right_eye: [362, 398, 384, 385, 386, 387, 388, 466, 263, 249, 390, 373, 374, 380, 381, 382]
+};
+
+// Key anchor landmarks for transform computation
+const EYE_ANCHORS = {
+  leftOuterCorner: 33,
+  leftInnerCorner: 133,
+  rightInnerCorner: 362,
+  rightOuterCorner: 263
+};
+
+let faceLandmarker = null;
+
+async function initMediaPipe() {
+  const statusEl = document.getElementById('status');
+  try {
+    statusEl.textContent = 'Loading MediaPipe WASM runtime...';
+    const vision = await FilesetResolver.forVisionTasks(
+      "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.15/wasm"
+    );
+    statusEl.textContent = 'Creating FaceLandmarker...';
+    faceLandmarker = await FaceLandmarker.createFromOptions(vision, {
+      baseOptions: {
+        modelAssetPath: "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
+        delegate: "CPU"
+      },
+      runningMode: "IMAGE",
+      numFaces: 10,
+      outputFaceBlendshapes: false,
+      outputFacialTransformationMatrices: false
+    });
+    statusEl.textContent = 'MediaPipe ready.';
+    window.mediapipeReady = true;
+  } catch (err) {
+    statusEl.textContent = 'MediaPipe init FAILED: ' + err.message;
+    console.error('[mediapipe] Init error:', err);
+    throw err;
+  }
+}
+
+// ---- Geometry Helpers (ported from geometry.js) ----
+
+function centroid(points) {
+  let sx = 0, sy = 0;
+  for (const [x, y] of points) { sx += x; sy += y; }
+  return [sx / points.length, sy / points.length];
+}
+
+function expandPoints(points, px) {
+  if (px <= 0 || points.length === 0) return points.slice();
+  const [cx, cy] = centroid(points);
+  return points.map(([x, y]) => {
+    const dx = x - cx, dy = y - cy;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist < 0.001) return [x, y];
+    const scale = (dist + px) / dist;
+    return [cx + dx * scale, cy + dy * scale];
+  });
+}
+
+function chaikinSmooth(points, iterations) {
+  if (iterations <= 0 || points.length < 3) return points.slice();
+  let pts = points.slice();
+  for (let iter = 0; iter < iterations; iter++) {
+    const smoothed = [];
+    const n = pts.length;
+    for (let i = 0; i < n; i++) {
+      const [x1, y1] = pts[i];
+      const [x2, y2] = pts[(i + 1) % n];
+      smoothed.push([0.75 * x1 + 0.25 * x2, 0.75 * y1 + 0.25 * y2]);
+      smoothed.push([0.25 * x1 + 0.75 * x2, 0.25 * y1 + 0.75 * y2]);
+    }
+    pts = smoothed;
+  }
+  return pts;
+}
+
+function ensureClosed(points) {
+  if (points.length < 2) return points;
+  const first = points[0], last = points[points.length - 1];
+  const dx = first[0] - last[0], dy = first[1] - last[1];
+  if (Math.sqrt(dx * dx + dy * dy) > 0.5) return [...points, [first[0], first[1]]];
+  return points;
+}
+
+function roundPoints(points) {
+  return points.map(([x, y]) => [Math.round(x * 10) / 10, Math.round(y * 10) / 10]);
+}
+
+function processFeaturePoints(rawPoints) {
+  let pts = rawPoints;
+  pts = expandPoints(pts, 3); // slightly more than default 2 for eye band
+  pts = chaikinSmooth(pts, 1);
+  pts = ensureClosed(pts);
+  pts = roundPoints(pts);
+  return pts;
+}
+
+function boundingBox(points) {
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const [x, y] of points) {
+    if (x < minX) minX = x;
+    if (y < minY) minY = y;
+    if (x > maxX) maxX = x;
+    if (y > maxY) maxY = y;
+  }
+  return { x: Math.round(minX), y: Math.round(minY), width: Math.round(maxX - minX), height: Math.round(maxY - minY) };
+}
+
+// ---- Face Selection ----
+
+function faceArea(landmarks, imgW, imgH) {
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  for (const lm of landmarks) {
+    const px = lm.x * imgW, py = lm.y * imgH;
+    if (px < minX) minX = px;
+    if (px > maxX) maxX = px;
+    if (py < minY) minY = py;
+    if (py > maxY) maxY = py;
+  }
+  return { area: (maxX - minX) * (maxY - minY), minX, maxX, minY, maxY, cx: (minX + maxX) / 2, cy: (minY + maxY) / 2 };
+}
+
+function selectFace(faces, hint, imgW, imgH) {
+  if (!faces || faces.length === 0) return -1;
+  if (faces.length === 1) return 0;
+
+  const faceMetas = faces.map((f, i) => ({ index: i, ...faceArea(f, imgW, imgH) }));
+
+  switch (hint) {
+    case 'leftmost': {
+      let best = faceMetas[0];
+      for (const m of faceMetas) { if (m.cx < best.cx) best = m; }
+      return best.index;
+    }
+    case 'rightmost': {
+      let best = faceMetas[0];
+      for (const m of faceMetas) { if (m.cx > best.cx) best = m; }
+      return best.index;
+    }
+    case 'center': {
+      const imgCx = imgW / 2;
+      let best = faceMetas[0], bestDist = Math.abs(best.cx - imgCx);
+      for (const m of faceMetas) {
+        const d = Math.abs(m.cx - imgCx);
+        if (d < bestDist) { best = m; bestDist = d; }
+      }
+      return best.index;
+    }
+    case 'largest':
+    default: {
+      let best = faceMetas[0];
+      for (const m of faceMetas) { if (m.area > best.area) best = m; }
+      return best.index;
+    }
+  }
+}
+
+// ---- Transform Computation ----
+
+function computeSimilarityTransform(srcPoints, tgtPoints) {
+  const [scx, scy] = centroid(srcPoints);
+  const [tcx, tcy] = centroid(tgtPoints);
+
+  if (srcPoints.length < 2 || tgtPoints.length < 2) {
+    return { translateX: tcx - scx, translateY: tcy - scy, rotation: 0, scale: 1.0 };
+  }
+
+  // Use first and midpoint as anchor pair (same as geometry.js)
+  const sMid = Math.floor(srcPoints.length / 2);
+  const tMid = Math.floor(tgtPoints.length / 2);
+
+  const sdx = srcPoints[sMid][0] - srcPoints[0][0];
+  const sdy = srcPoints[sMid][1] - srcPoints[0][1];
+  const sDist = Math.sqrt(sdx * sdx + sdy * sdy);
+  const sAngle = Math.atan2(sdy, sdx);
+
+  const tdx = tgtPoints[tMid][0] - tgtPoints[0][0];
+  const tdy = tgtPoints[tMid][1] - tgtPoints[0][1];
+  const tDist = Math.sqrt(tdx * tdx + tdy * tdy);
+  const tAngle = Math.atan2(tdy, tdx);
+
+  const rotation = tAngle - sAngle;
+  const scale = sDist > 0.001 ? tDist / sDist : 1.0;
+
+  return {
+    translateX: Math.round((tcx - scx) * 10) / 10,
+    translateY: Math.round((tcy - scy) * 10) / 10,
+    rotation: Math.round(rotation * 1000) / 1000,
+    scale: Math.round(scale * 1000) / 1000
+  };
+}
+
+// ---- Eye Landmark Extraction ----
+
+function extractEyePoints(faceLandmarks, imgW, imgH) {
+  const allIndices = [...FEATURE_GROUPS.left_eye, ...FEATURE_GROUPS.right_eye];
+  const points = [];
+  for (const idx of allIndices) {
+    if (idx < faceLandmarks.length) {
+      const lm = faceLandmarks[idx];
+      points.push([Math.round(lm.x * imgW * 10) / 10, Math.round(lm.y * imgH * 10) / 10]);
+    }
+  }
+  return points;
+}
+
+function extractEyeAnchorPoints(faceLandmarks, imgW, imgH) {
+  // 4 key anchor points for robust transform: outer corners of both eyes
+  return {
+    leftOuter: [faceLandmarks[EYE_ANCHORS.leftOuterCorner].x * imgW, faceLandmarks[EYE_ANCHORS.leftOuterCorner].y * imgH],
+    leftInner: [faceLandmarks[EYE_ANCHORS.leftInnerCorner].x * imgW, faceLandmarks[EYE_ANCHORS.leftInnerCorner].y * imgH],
+    rightInner: [faceLandmarks[EYE_ANCHORS.rightInnerCorner].x * imgW, faceLandmarks[EYE_ANCHORS.rightInnerCorner].y * imgH],
+    rightOuter: [faceLandmarks[EYE_ANCHORS.rightOuterCorner].x * imgW, faceLandmarks[EYE_ANCHORS.rightOuterCorner].y * imgH]
+  };
+}
+
+function interEyeDistance(anchors) {
+  const dx = anchors.rightOuter[0] - anchors.leftOuter[0];
+  const dy = anchors.rightOuter[1] - anchors.leftOuter[1];
+  return Math.sqrt(dx * dx + dy * dy);
+}
+
+function eyeCenterlineAngle(anchors) {
+  const dx = anchors.rightOuter[0] - anchors.leftOuter[0];
+  const dy = anchors.rightOuter[1] - anchors.leftOuter[1];
+  return Math.atan2(dy, dx);
+}
+
+// ---- Debug Rendering ----
+
+function renderDebug(img, faces, selectedIdx, eyePoints, patchBox, label) {
+  const container = document.getElementById('debug-container');
+  if (!container || !window.MEDIAPIPE_DEBUG) return;
+
+  container.style.display = 'flex';
+  const canvas = document.createElement('canvas');
+  canvas.width = img.naturalWidth;
+  canvas.height = img.naturalHeight;
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(img, 0, 0);
+
+  // Draw all face bounding boxes (light gray)
+  for (let i = 0; i < faces.length; i++) {
+    const meta = faceArea(faces[i], img.naturalWidth, img.naturalHeight);
+    ctx.strokeStyle = i === selectedIdx ? '#00ff00' : '#666666';
+    ctx.lineWidth = i === selectedIdx ? 3 : 1;
+    ctx.strokeRect(meta.minX, meta.minY, meta.maxX - meta.minX, meta.maxY - meta.minY);
+    ctx.fillStyle = i === selectedIdx ? '#00ff00' : '#666666';
+    ctx.font = '14px monospace';
+    ctx.fillText('Face ' + i + (i === selectedIdx ? ' (selected)' : ''), meta.minX, meta.minY - 4);
+  }
+
+  // Draw eye landmarks
+  if (eyePoints) {
+    ctx.fillStyle = '#ff0000';
+    for (const [x, y] of eyePoints) {
+      ctx.beginPath();
+      ctx.arc(x, y, 2, 0, 2 * Math.PI);
+      ctx.fill();
+    }
+  }
+
+  // Draw patch box
+  if (patchBox) {
+    ctx.strokeStyle = label === 'REFERENCE' ? '#ff3333' : '#3399ff';
+    ctx.lineWidth = 2;
+    ctx.setLineDash([8, 4]);
+    ctx.strokeRect(patchBox.x, patchBox.y, patchBox.width, patchBox.height);
+    ctx.setLineDash([]);
+  }
+
+  // Label
+  ctx.fillStyle = 'rgba(0,0,0,0.7)';
+  ctx.fillRect(0, 0, label.length * 10 + 16, 24);
+  ctx.fillStyle = '#ffffff';
+  ctx.font = 'bold 14px monospace';
+  ctx.fillText(label, 8, 17);
+
+  container.appendChild(canvas);
+}
+
+// ---- Image Loading ----
+
+function loadImage(url) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => resolve(img);
+    img.onerror = (e) => reject(new Error('Failed to load image: ' + url));
+    img.src = url;
+  });
+}
+
+// ---- Main Detection Function ----
+
+window.detectEyeGeometry = async function(baseUrl, refUrl, baseFaceHint, refFaceHint) {
+  if (!faceLandmarker) throw new Error('MediaPipe not initialized');
+
+  baseFaceHint = baseFaceHint || 'largest';
+  refFaceHint = refFaceHint || 'largest';
+
+  // Load both images
+  const [baseImg, refImg] = await Promise.all([loadImage(baseUrl), loadImage(refUrl)]);
+  const baseW = baseImg.naturalWidth, baseH = baseImg.naturalHeight;
+  const refW = refImg.naturalWidth, refH = refImg.naturalHeight;
+
+  // Detect faces in both images
+  const baseResult = faceLandmarker.detect(baseImg);
+  const refResult = faceLandmarker.detect(refImg);
+
+  const baseFaces = baseResult.faceLandmarks || [];
+  const refFaces = refResult.faceLandmarks || [];
+
+  if (baseFaces.length === 0) {
+    return { success: false, error: 'No face detected in base image', detections: { baseFaces: 0, referenceFaces: refFaces.length } };
+  }
+  if (refFaces.length === 0) {
+    return { success: false, error: 'No face detected in reference image', detections: { baseFaces: baseFaces.length, referenceFaces: 0 } };
+  }
+
+  // Select faces
+  const baseFaceIdx = selectFace(baseFaces, baseFaceHint, baseW, baseH);
+  const refFaceIdx = selectFace(refFaces, refFaceHint, refW, refH);
+
+  const baseFaceLandmarks = baseFaces[baseFaceIdx];
+  const refFaceLandmarks = refFaces[refFaceIdx];
+
+  // Extract raw eye points (pixel space)
+  const baseRawEyePoints = extractEyePoints(baseFaceLandmarks, baseW, baseH);
+  const refRawEyePoints = extractEyePoints(refFaceLandmarks, refW, refH);
+
+  // Process into smooth path points
+  const basePathPoints = processFeaturePoints(baseRawEyePoints);
+  const refPathPoints = processFeaturePoints(refRawEyePoints);
+
+  // Compute bounding boxes
+  const baseBbox = boundingBox(baseRawEyePoints);
+  const refBbox = boundingBox(refRawEyePoints);
+
+  // Compute transform using eye anchor points
+  const baseAnchors = extractEyeAnchorPoints(baseFaceLandmarks, baseW, baseH);
+  const refAnchors = extractEyeAnchorPoints(refFaceLandmarks, refW, refH);
+
+  const refIED = interEyeDistance(refAnchors);
+  const baseIED = interEyeDistance(baseAnchors);
+  const scale = baseIED > 0.001 ? baseIED / refIED : 1.0;
+
+  const refAngle = eyeCenterlineAngle(refAnchors);
+  const baseAngle = eyeCenterlineAngle(baseAnchors);
+  const rotation = baseAngle - refAngle;
+
+  const [refCx, refCy] = centroid(refRawEyePoints);
+  const [baseCx, baseCy] = centroid(baseRawEyePoints);
+
+  const transform = {
+    translateX: Math.round((baseCx - refCx) * 10) / 10,
+    translateY: Math.round((baseCy - refCy) * 10) / 10,
+    rotation: Math.round(rotation * 1000) / 1000,
+    scale: Math.round(scale * 1000) / 1000
+  };
+
+  // Confidence: based on face detection scores and transform sanity
+  let confidence = 1.0;
+  if (Math.abs(transform.scale - 1.0) > 0.3) confidence -= 0.2;
+  if (Math.abs(transform.rotation) > 0.15) confidence -= 0.2;
+  if (baseFaces.length > 3 || refFaces.length > 3) confidence -= 0.1;
+  confidence = Math.max(0, Math.round(confidence * 100) / 100);
+
+  // Recommended feather radius based on eye band size
+  const avgBandHeight = (baseBbox.height + refBbox.height) / 2;
+  const featherRadius = Math.max(5, Math.min(15, Math.round(avgBandHeight * 0.3)));
+
+  // Debug rendering (if enabled)
+  renderDebug(baseImg, baseFaces, baseFaceIdx, baseRawEyePoints, baseBbox, 'BASE (target)');
+  renderDebug(refImg, refFaces, refFaceIdx, refRawEyePoints, refBbox, 'REFERENCE (source)');
+
+  // Build preview data for downstream preview rendering
+  const allBaseFaceBboxes = baseFaces.map(f => faceArea(f, baseW, baseH));
+  const allRefFaceBboxes = refFaces.map(f => faceArea(f, refW, refH));
+
+  return {
+    success: true,
+    imageMeta: {
+      base: { width: baseW, height: baseH },
+      reference: { width: refW, height: refH }
+    },
+    detections: {
+      baseFaces: baseFaces.length,
+      referenceFaces: refFaces.length,
+      chosenBaseFaceIndex: baseFaceIdx,
+      chosenReferenceFaceIndex: refFaceIdx
+    },
+    eyeGeometry: {
+      source: {
+        rawPoints: refRawEyePoints,
+        pathPoints: refPathPoints,
+        boundingBox: refBbox
+      },
+      target: {
+        rawPoints: baseRawEyePoints,
+        pathPoints: basePathPoints,
+        boundingBox: baseBbox
+      },
+      transform: transform,
+      featherRadius: featherRadius,
+      confidence: confidence
+    },
+    previewData: {
+      allBaseFaces: allBaseFaceBboxes.map(m => ({ x: Math.round(m.minX), y: Math.round(m.minY), width: Math.round(m.maxX - m.minX), height: Math.round(m.maxY - m.minY) })),
+      allRefFaces: allRefFaceBboxes.map(m => ({ x: Math.round(m.minX), y: Math.round(m.minY), width: Math.round(m.maxX - m.minX), height: Math.round(m.maxY - m.minY) })),
+      baseEyeLandmarks: baseRawEyePoints,
+      refEyeLandmarks: refRawEyePoints,
+      selectedBaseFaceIdx: baseFaceIdx,
+      selectedRefFaceIdx: refFaceIdx
+    }
+  };
+};
+
+// Initialize on load
+initMediaPipe().catch(err => {
+  console.error('[mediapipe] Fatal init error:', err);
+});
+</script>
+</body>
+</html>
