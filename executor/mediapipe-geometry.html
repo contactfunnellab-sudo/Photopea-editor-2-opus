@@ -17,8 +17,9 @@
 <script type="module">
 // =============================================
 // MediaPipe Face Mesh — Browser-Side Geometry
-// Detects faces + eye landmarks on both images,
-// computes congruent eye geometry + transform.
+// Detects faces + per-eye landmarks on both images,
+// computes separate left_eye and right_eye geometry
+// with per-eye transforms.
 // Called from Playwright via window.detectEyeGeometry()
 // =============================================
 
@@ -31,7 +32,7 @@ const FEATURE_GROUPS = {
   right_eye: [362, 398, 384, 385, 386, 387, 388, 466, 263, 249, 390, 373, 374, 380, 381, 382]
 };
 
-// Key anchor landmarks for transform computation
+// Key anchor landmarks for per-eye transform computation
 const EYE_ANCHORS = {
   leftOuterCorner: 33,
   leftInnerCorner: 133,
@@ -76,14 +77,20 @@ function centroid(points) {
   return [sx / points.length, sy / points.length];
 }
 
-function expandPoints(points, px) {
-  if (px <= 0 || points.length === 0) return points.slice();
+function expandPointsAsymmetric(points, topPx, bottomPx, leftPx, rightPx) {
+  // Asymmetric expand: different amounts per direction
+  if (points.length === 0) return points.slice();
   const [cx, cy] = centroid(points);
   return points.map(([x, y]) => {
     const dx = x - cx, dy = y - cy;
+    // Determine which side this point is on relative to centroid
+    const expandX = dx >= 0 ? rightPx : leftPx;
+    const expandY = dy >= 0 ? bottomPx : topPx;
     const dist = Math.sqrt(dx * dx + dy * dy);
     if (dist < 0.001) return [x, y];
-    const scale = (dist + px) / dist;
+    // Directional expand: scale the radial offset per-direction
+    const radialExpand = Math.sqrt(expandX * expandX * (dx * dx) + expandY * expandY * (dy * dy)) / dist;
+    const scale = (dist + radialExpand) / dist;
     return [cx + dx * scale, cy + dy * scale];
   });
 }
@@ -117,9 +124,22 @@ function roundPoints(points) {
   return points.map(([x, y]) => [Math.round(x * 10) / 10, Math.round(y * 10) / 10]);
 }
 
-function processFeaturePoints(rawPoints) {
-  let pts = rawPoints;
-  pts = expandPoints(pts, 3); // slightly more than default 2 for eye band
+// Eyelid-aware asymmetric expand for a single eye
+function processEyePoints(rawPoints) {
+  // Compute eye dimensions from raw landmarks
+  const bb = boundingBox(rawPoints);
+  const eyeW = bb.width;
+  const eyeH = bb.height;
+
+  // Asymmetric margins scaled from eye size:
+  // - top: strongest (capture upper eyelid fold + brow transition)
+  // - bottom: moderate (lower lid + under-eye)
+  // - horizontal: mild
+  const topMargin = Math.max(3, Math.round(eyeH * 0.6));
+  const bottomMargin = Math.max(2, Math.round(eyeH * 0.4));
+  const hMargin = Math.max(2, Math.round(eyeW * 0.08));
+
+  let pts = expandPointsAsymmetric(rawPoints, topMargin, bottomMargin, hMargin, hMargin);
   pts = chaikinSmooth(pts, 1);
   pts = ensureClosed(pts);
   pts = roundPoints(pts);
@@ -186,31 +206,25 @@ function selectFace(faces, hint, imgW, imgH) {
   }
 }
 
-// ---- Transform Computation ----
+// ---- Per-Eye Transform Computation ----
 
-function computeSimilarityTransform(srcPoints, tgtPoints) {
-  const [scx, scy] = centroid(srcPoints);
-  const [tcx, tcy] = centroid(tgtPoints);
+function computePerEyeTransform(srcEyePoints, tgtEyePoints, srcAnchor1, srcAnchor2, tgtAnchor1, tgtAnchor2) {
+  // Centroid-based translation
+  const [scx, scy] = centroid(srcEyePoints);
+  const [tcx, tcy] = centroid(tgtEyePoints);
 
-  if (srcPoints.length < 2 || tgtPoints.length < 2) {
-    return { translateX: tcx - scx, translateY: tcy - scy, rotation: 0, scale: 1.0 };
-  }
-
-  // Use first and midpoint as anchor pair (same as geometry.js)
-  const sMid = Math.floor(srcPoints.length / 2);
-  const tMid = Math.floor(tgtPoints.length / 2);
-
-  const sdx = srcPoints[sMid][0] - srcPoints[0][0];
-  const sdy = srcPoints[sMid][1] - srcPoints[0][1];
+  // Scale and rotation from anchor pair (corner points of this specific eye)
+  const sdx = srcAnchor2[0] - srcAnchor1[0];
+  const sdy = srcAnchor2[1] - srcAnchor1[1];
   const sDist = Math.sqrt(sdx * sdx + sdy * sdy);
   const sAngle = Math.atan2(sdy, sdx);
 
-  const tdx = tgtPoints[tMid][0] - tgtPoints[0][0];
-  const tdy = tgtPoints[tMid][1] - tgtPoints[0][1];
+  const tdx = tgtAnchor2[0] - tgtAnchor1[0];
+  const tdy = tgtAnchor2[1] - tgtAnchor1[1];
   const tDist = Math.sqrt(tdx * tdx + tdy * tdy);
   const tAngle = Math.atan2(tdy, tdx);
 
-  const rotation = tAngle - sAngle;
+  const rotation = sDist > 0.001 && tDist > 0.001 ? tAngle - sAngle : 0;
   const scale = sDist > 0.001 ? tDist / sDist : 1.0;
 
   return {
@@ -221,12 +235,11 @@ function computeSimilarityTransform(srcPoints, tgtPoints) {
   };
 }
 
-// ---- Eye Landmark Extraction ----
+// ---- Eye Landmark Extraction (per-eye) ----
 
-function extractEyePoints(faceLandmarks, imgW, imgH) {
-  const allIndices = [...FEATURE_GROUPS.left_eye, ...FEATURE_GROUPS.right_eye];
+function extractSingleEyePoints(faceLandmarks, indices, imgW, imgH) {
   const points = [];
-  for (const idx of allIndices) {
+  for (const idx of indices) {
     if (idx < faceLandmarks.length) {
       const lm = faceLandmarks[idx];
       points.push([Math.round(lm.x * imgW * 10) / 10, Math.round(lm.y * imgH * 10) / 10]);
@@ -235,31 +248,41 @@ function extractEyePoints(faceLandmarks, imgW, imgH) {
   return points;
 }
 
-function extractEyeAnchorPoints(faceLandmarks, imgW, imgH) {
-  // 4 key anchor points for robust transform: outer corners of both eyes
-  return {
-    leftOuter: [faceLandmarks[EYE_ANCHORS.leftOuterCorner].x * imgW, faceLandmarks[EYE_ANCHORS.leftOuterCorner].y * imgH],
-    leftInner: [faceLandmarks[EYE_ANCHORS.leftInnerCorner].x * imgW, faceLandmarks[EYE_ANCHORS.leftInnerCorner].y * imgH],
-    rightInner: [faceLandmarks[EYE_ANCHORS.rightInnerCorner].x * imgW, faceLandmarks[EYE_ANCHORS.rightInnerCorner].y * imgH],
-    rightOuter: [faceLandmarks[EYE_ANCHORS.rightOuterCorner].x * imgW, faceLandmarks[EYE_ANCHORS.rightOuterCorner].y * imgH]
-  };
+function getAnchorPoint(faceLandmarks, idx, imgW, imgH) {
+  const lm = faceLandmarks[idx];
+  return [lm.x * imgW, lm.y * imgH];
 }
 
-function interEyeDistance(anchors) {
-  const dx = anchors.rightOuter[0] - anchors.leftOuter[0];
-  const dy = anchors.rightOuter[1] - anchors.leftOuter[1];
-  return Math.sqrt(dx * dx + dy * dy);
+// ---- Blink Detection Heuristic ----
+// Eye aspect ratio: ratio of vertical extent to horizontal extent.
+// Lower = more closed. Useful for base/reference sanity check.
+function eyeAspectRatio(leftEyePoints, rightEyePoints) {
+  function ear(pts) {
+    const bb = boundingBox(pts);
+    if (bb.width < 1) return 0;
+    return bb.height / bb.width;
+  }
+  return (ear(leftEyePoints) + ear(rightEyePoints)) / 2;
 }
 
-function eyeCenterlineAngle(anchors) {
-  const dx = anchors.rightOuter[0] - anchors.leftOuter[0];
-  const dy = anchors.rightOuter[1] - anchors.leftOuter[1];
-  return Math.atan2(dy, dx);
+// ---- Blend Policy ----
+
+function eyeBlendPolicy(transform, overallConfidence) {
+  let opacity = 100;
+  let featherRadius = 2;
+
+  const scaleDelta = Math.abs((transform.scale || 1.0) - 1.0);
+  const rotationDeg = Math.abs((transform.rotation || 0) * 180 / Math.PI);
+
+  if (overallConfidence < 0.6 || scaleDelta > 0.15 || rotationDeg > 5) {
+    featherRadius = 3;
+  }
+  return { opacity, featherRadius };
 }
 
 // ---- Debug Rendering ----
 
-function renderDebug(img, faces, selectedIdx, eyePoints, patchBox, label) {
+function renderDebug(img, faces, selectedIdx, leftEyePoints, rightEyePoints, leftBbox, rightBbox, label) {
   const container = document.getElementById('debug-container');
   if (!container || !window.MEDIAPIPE_DEBUG) return;
 
@@ -270,7 +293,7 @@ function renderDebug(img, faces, selectedIdx, eyePoints, patchBox, label) {
   const ctx = canvas.getContext('2d');
   ctx.drawImage(img, 0, 0);
 
-  // Draw all face bounding boxes (light gray)
+  // Draw all face bounding boxes
   for (let i = 0; i < faces.length; i++) {
     const meta = faceArea(faces[i], img.naturalWidth, img.naturalHeight);
     ctx.strokeStyle = i === selectedIdx ? '#00ff00' : '#666666';
@@ -281,23 +304,32 @@ function renderDebug(img, faces, selectedIdx, eyePoints, patchBox, label) {
     ctx.fillText('Face ' + i + (i === selectedIdx ? ' (selected)' : ''), meta.minX, meta.minY - 4);
   }
 
-  // Draw eye landmarks
-  if (eyePoints) {
-    ctx.fillStyle = '#ff0000';
-    for (const [x, y] of eyePoints) {
-      ctx.beginPath();
-      ctx.arc(x, y, 2, 0, 2 * Math.PI);
-      ctx.fill();
-    }
+  // Draw left eye landmarks (cyan)
+  ctx.fillStyle = '#00ccff';
+  for (const [x, y] of leftEyePoints) {
+    ctx.beginPath(); ctx.arc(x, y, 2, 0, 2 * Math.PI); ctx.fill();
+  }
+  // Draw right eye landmarks (magenta)
+  ctx.fillStyle = '#ff00cc';
+  for (const [x, y] of rightEyePoints) {
+    ctx.beginPath(); ctx.arc(x, y, 2, 0, 2 * Math.PI); ctx.fill();
   }
 
-  // Draw patch box
-  if (patchBox) {
-    ctx.strokeStyle = label === 'REFERENCE' ? '#ff3333' : '#3399ff';
-    ctx.lineWidth = 2;
-    ctx.setLineDash([8, 4]);
-    ctx.strokeRect(patchBox.x, patchBox.y, patchBox.width, patchBox.height);
+  // Draw left eye patch box
+  if (leftBbox) {
+    ctx.strokeStyle = '#00ccff'; ctx.lineWidth = 2; ctx.setLineDash([6, 3]);
+    ctx.strokeRect(leftBbox.x, leftBbox.y, leftBbox.width, leftBbox.height);
     ctx.setLineDash([]);
+    ctx.fillStyle = '#00ccff'; ctx.font = '11px monospace';
+    ctx.fillText('L_EYE', leftBbox.x, leftBbox.y - 3);
+  }
+  // Draw right eye patch box
+  if (rightBbox) {
+    ctx.strokeStyle = '#ff00cc'; ctx.lineWidth = 2; ctx.setLineDash([6, 3]);
+    ctx.strokeRect(rightBbox.x, rightBbox.y, rightBbox.width, rightBbox.height);
+    ctx.setLineDash([]);
+    ctx.fillStyle = '#ff00cc'; ctx.font = '11px monospace';
+    ctx.fillText('R_EYE', rightBbox.x, rightBbox.y - 3);
   }
 
   // Label
@@ -353,59 +385,74 @@ window.detectEyeGeometry = async function(baseUrl, refUrl, baseFaceHint, refFace
   const baseFaceIdx = selectFace(baseFaces, baseFaceHint, baseW, baseH);
   const refFaceIdx = selectFace(refFaces, refFaceHint, refW, refH);
 
-  const baseFaceLandmarks = baseFaces[baseFaceIdx];
-  const refFaceLandmarks = refFaces[refFaceIdx];
+  const baseFaceLm = baseFaces[baseFaceIdx];
+  const refFaceLm = refFaces[refFaceIdx];
 
-  // Extract raw eye points (pixel space)
-  const baseRawEyePoints = extractEyePoints(baseFaceLandmarks, baseW, baseH);
-  const refRawEyePoints = extractEyePoints(refFaceLandmarks, refW, refH);
+  // ---- Extract per-eye landmarks (pixel space) ----
+  const baseLeftRaw = extractSingleEyePoints(baseFaceLm, FEATURE_GROUPS.left_eye, baseW, baseH);
+  const baseRightRaw = extractSingleEyePoints(baseFaceLm, FEATURE_GROUPS.right_eye, baseW, baseH);
+  const refLeftRaw = extractSingleEyePoints(refFaceLm, FEATURE_GROUPS.left_eye, refW, refH);
+  const refRightRaw = extractSingleEyePoints(refFaceLm, FEATURE_GROUPS.right_eye, refW, refH);
 
-  // Process into smooth path points
-  const basePathPoints = processFeaturePoints(baseRawEyePoints);
-  const refPathPoints = processFeaturePoints(refRawEyePoints);
+  // ---- Process into smooth path points with eyelid-aware margins ----
+  const baseLeftPath = processEyePoints(baseLeftRaw);
+  const baseRightPath = processEyePoints(baseRightRaw);
+  const refLeftPath = processEyePoints(refLeftRaw);
+  const refRightPath = processEyePoints(refRightRaw);
 
-  // Compute bounding boxes
-  const baseBbox = boundingBox(baseRawEyePoints);
-  const refBbox = boundingBox(refRawEyePoints);
+  // ---- Bounding boxes ----
+  const baseLeftBbox = boundingBox(baseLeftPath);
+  const baseRightBbox = boundingBox(baseRightPath);
+  const refLeftBbox = boundingBox(refLeftPath);
+  const refRightBbox = boundingBox(refRightPath);
 
-  // Compute transform using eye anchor points
-  const baseAnchors = extractEyeAnchorPoints(baseFaceLandmarks, baseW, baseH);
-  const refAnchors = extractEyeAnchorPoints(refFaceLandmarks, refW, refH);
+  // ---- Per-eye anchor points for transform ----
+  const baseLeftOuter = getAnchorPoint(baseFaceLm, EYE_ANCHORS.leftOuterCorner, baseW, baseH);
+  const baseLeftInner = getAnchorPoint(baseFaceLm, EYE_ANCHORS.leftInnerCorner, baseW, baseH);
+  const baseRightInner = getAnchorPoint(baseFaceLm, EYE_ANCHORS.rightInnerCorner, baseW, baseH);
+  const baseRightOuter = getAnchorPoint(baseFaceLm, EYE_ANCHORS.rightOuterCorner, baseW, baseH);
 
-  const refIED = interEyeDistance(refAnchors);
-  const baseIED = interEyeDistance(baseAnchors);
-  const scale = baseIED > 0.001 ? baseIED / refIED : 1.0;
+  const refLeftOuter = getAnchorPoint(refFaceLm, EYE_ANCHORS.leftOuterCorner, refW, refH);
+  const refLeftInner = getAnchorPoint(refFaceLm, EYE_ANCHORS.leftInnerCorner, refW, refH);
+  const refRightInner = getAnchorPoint(refFaceLm, EYE_ANCHORS.rightInnerCorner, refW, refH);
+  const refRightOuter = getAnchorPoint(refFaceLm, EYE_ANCHORS.rightOuterCorner, refW, refH);
 
-  const refAngle = eyeCenterlineAngle(refAnchors);
-  const baseAngle = eyeCenterlineAngle(baseAnchors);
-  const rotation = baseAngle - refAngle;
+  // ---- Per-eye transforms ----
+  // Left eye: anchor pair = leftOuterCorner → leftInnerCorner
+  const leftTransform = computePerEyeTransform(
+    refLeftRaw, baseLeftRaw,
+    refLeftOuter, refLeftInner,
+    baseLeftOuter, baseLeftInner
+  );
+  // Right eye: anchor pair = rightInnerCorner → rightOuterCorner
+  const rightTransform = computePerEyeTransform(
+    refRightRaw, baseRightRaw,
+    refRightInner, refRightOuter,
+    baseRightInner, baseRightOuter
+  );
 
-  const [refCx, refCy] = centroid(refRawEyePoints);
-  const [baseCx, baseCy] = centroid(baseRawEyePoints);
-
-  const transform = {
-    translateX: Math.round((baseCx - refCx) * 10) / 10,
-    translateY: Math.round((baseCy - refCy) * 10) / 10,
-    rotation: Math.round(rotation * 1000) / 1000,
-    scale: Math.round(scale * 1000) / 1000
-  };
-
-  // Confidence: based on face detection scores and transform sanity
+  // ---- Confidence ----
   let confidence = 1.0;
-  if (Math.abs(transform.scale - 1.0) > 0.3) confidence -= 0.2;
-  if (Math.abs(transform.rotation) > 0.15) confidence -= 0.2;
+  const avgScale = (leftTransform.scale + rightTransform.scale) / 2;
+  const avgRot = (Math.abs(leftTransform.rotation) + Math.abs(rightTransform.rotation)) / 2;
+  if (Math.abs(avgScale - 1.0) > 0.3) confidence -= 0.2;
+  if (avgRot > 0.15) confidence -= 0.2;
   if (baseFaces.length > 3 || refFaces.length > 3) confidence -= 0.1;
   confidence = Math.max(0, Math.round(confidence * 100) / 100);
 
-  // Recommended feather radius based on eye band size
-  const avgBandHeight = (baseBbox.height + refBbox.height) / 2;
-  const featherRadius = Math.max(5, Math.min(15, Math.round(avgBandHeight * 0.3)));
+  // ---- Blend policy per eye ----
+  const leftBlend = eyeBlendPolicy(leftTransform, confidence);
+  const rightBlend = eyeBlendPolicy(rightTransform, confidence);
 
-  // Debug rendering (if enabled)
-  renderDebug(baseImg, baseFaces, baseFaceIdx, baseRawEyePoints, baseBbox, 'BASE (target)');
-  renderDebug(refImg, refFaces, refFaceIdx, refRawEyePoints, refBbox, 'REFERENCE (source)');
+  // ---- Eye aspect ratio for blink detection ----
+  const baseEAR = eyeAspectRatio(baseLeftRaw, baseRightRaw);
+  const refEAR = eyeAspectRatio(refLeftRaw, refRightRaw);
 
-  // Build preview data for downstream preview rendering
+  // ---- Debug rendering ----
+  renderDebug(baseImg, baseFaces, baseFaceIdx, baseLeftRaw, baseRightRaw, baseLeftBbox, baseRightBbox, 'BASE (target)');
+  renderDebug(refImg, refFaces, refFaceIdx, refLeftRaw, refRightRaw, refLeftBbox, refRightBbox, 'REFERENCE (source)');
+
+  // ---- Build face bbox preview data ----
   const allBaseFaceBboxes = baseFaces.map(f => faceArea(f, baseW, baseH));
   const allRefFaceBboxes = refFaces.map(f => faceArea(f, refW, refH));
 
@@ -421,26 +468,35 @@ window.detectEyeGeometry = async function(baseUrl, refUrl, baseFaceHint, refFace
       chosenBaseFaceIndex: baseFaceIdx,
       chosenReferenceFaceIndex: refFaceIdx
     },
-    eyeGeometry: {
-      source: {
-        rawPoints: refRawEyePoints,
-        pathPoints: refPathPoints,
-        boundingBox: refBbox
-      },
-      target: {
-        rawPoints: baseRawEyePoints,
-        pathPoints: basePathPoints,
-        boundingBox: baseBbox
-      },
-      transform: transform,
-      featherRadius: featherRadius,
-      confidence: confidence
+    blinkHeuristic: {
+      baseEAR: Math.round(baseEAR * 1000) / 1000,
+      refEAR: Math.round(refEAR * 1000) / 1000,
+      baseMoreClosed: baseEAR < refEAR
     },
+    features: [
+      {
+        name: 'left_eye',
+        source: { rawPoints: refLeftRaw, pathPoints: refLeftPath, boundingBox: refLeftBbox },
+        target: { rawPoints: baseLeftRaw, pathPoints: baseLeftPath, boundingBox: baseLeftBbox },
+        placementTransform: leftTransform,
+        recommendedBlend: leftBlend
+      },
+      {
+        name: 'right_eye',
+        source: { rawPoints: refRightRaw, pathPoints: refRightPath, boundingBox: refRightBbox },
+        target: { rawPoints: baseRightRaw, pathPoints: baseRightPath, boundingBox: baseRightBbox },
+        placementTransform: rightTransform,
+        recommendedBlend: rightBlend
+      }
+    ],
+    confidence: confidence,
     previewData: {
       allBaseFaces: allBaseFaceBboxes.map(m => ({ x: Math.round(m.minX), y: Math.round(m.minY), width: Math.round(m.maxX - m.minX), height: Math.round(m.maxY - m.minY) })),
       allRefFaces: allRefFaceBboxes.map(m => ({ x: Math.round(m.minX), y: Math.round(m.minY), width: Math.round(m.maxX - m.minX), height: Math.round(m.maxY - m.minY) })),
-      baseEyeLandmarks: baseRawEyePoints,
-      refEyeLandmarks: refRawEyePoints,
+      baseLeftEyeLandmarks: baseLeftRaw,
+      baseRightEyeLandmarks: baseRightRaw,
+      refLeftEyeLandmarks: refLeftRaw,
+      refRightEyeLandmarks: refRightRaw,
       selectedBaseFaceIdx: baseFaceIdx,
       selectedRefFaceIdx: refFaceIdx
     }

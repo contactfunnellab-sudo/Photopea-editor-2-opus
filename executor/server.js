@@ -331,21 +331,27 @@ app.post('/api/preview-regions', async (req, res) => {
       fetchImageBuffer(referenceImageUrl)
     ]);
 
-    // Build preview data for each role
+    // Build preview data for each role — per-eye layout
     const gd = geometryData || {};
     const baseGeoData = {
       allFaces: gd.allBaseFaces || [],
       selectedFaceIdx: gd.selectedBaseFaceIdx,
-      eyeLandmarks: gd.baseEyeLandmarks || [],
-      patchBox: gd.targetPatchBox || null,
-      transform: gd.transform || null
+      leftEyeLandmarks: gd.baseLeftEyeLandmarks || [],
+      rightEyeLandmarks: gd.baseRightEyeLandmarks || [],
+      leftEyeBox: gd.leftEyeTargetBox || null,
+      rightEyeBox: gd.rightEyeTargetBox || null,
+      leftTransform: gd.leftTransform || null,
+      rightTransform: gd.rightTransform || null
     };
     const refGeoData = {
       allFaces: gd.allRefFaces || [],
       selectedFaceIdx: gd.selectedRefFaceIdx,
-      eyeLandmarks: gd.refEyeLandmarks || [],
-      patchBox: gd.sourcePatchBox || null,
-      transform: null
+      leftEyeLandmarks: gd.refLeftEyeLandmarks || [],
+      rightEyeLandmarks: gd.refRightEyeLandmarks || [],
+      leftEyeBox: gd.leftEyeSourceBox || null,
+      rightEyeBox: gd.rightEyeSourceBox || null,
+      leftTransform: null,
+      rightTransform: null
     };
 
     // Render annotated previews
