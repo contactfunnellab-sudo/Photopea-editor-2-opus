@@ -1,21 +1,24 @@
 /**
- * Preview renderer — landmark-aware previews with face detection,
- * eye landmarks, patch boxes, and role labels.
+ * Preview renderer — per-eye landmark-aware previews with face detection,
+ * separate left/right eye landmarks, patch boxes, and role labels.
  * Uses sharp SVG overlay. Lightweight, no canvas dependency.
  */
 const sharp = require('sharp');
 
 /**
- * Render a landmark-aware preview image.
+ * Render a per-eye landmark-aware preview image.
  *
  * @param {Buffer} imageBuffer - source image buffer
  * @param {string} role - "base" or "reference"
- * @param {object} geometryData - geometry data from MediaPipe
+ * @param {object} geometryData - per-eye geometry data from MediaPipe
  *   - allFaces: [{x,y,width,height},...] - all detected face bboxes
  *   - selectedFaceIdx: number - index of selected face
- *   - eyeLandmarks: [[x,y],...] - eye landmark points
- *   - patchBox: {x,y,width,height} - eye band bounding box
- *   - transform: {translateX, translateY, rotation, scale} - optional
+ *   - leftEyeLandmarks: [[x,y],...] - left eye landmark points
+ *   - rightEyeLandmarks: [[x,y],...] - right eye landmark points
+ *   - leftEyeBox: {x,y,width,height} - left eye patch bounding box
+ *   - rightEyeBox: {x,y,width,height} - right eye patch bounding box
+ *   - leftTransform: {translateX, translateY, rotation, scale} - optional
+ *   - rightTransform: {translateX, translateY, rotation, scale} - optional
  * @returns {Promise<Buffer>} annotated PNG buffer
  */
 async function renderPreview(imageBuffer, role, geometryData) {
@@ -24,13 +27,12 @@ async function renderPreview(imageBuffer, role, geometryData) {
   const h = meta.height;
 
   const isBase = role === 'base';
-  const patchColor = isBase ? '#3399ff' : '#ff3333';
   const label = isBase ? 'BASE (target)' : 'REFERENCE (source)';
 
   const svgParts = [];
   const gd = geometryData || {};
 
-  // 1. Draw all detected face bounding boxes (light gray for non-selected, green for selected)
+  // 1. Draw all detected face bounding boxes
   if (Array.isArray(gd.allFaces)) {
     for (let i = 0; i < gd.allFaces.length; i++) {
       const f = gd.allFaces[i];
@@ -48,50 +50,80 @@ async function renderPreview(imageBuffer, role, geometryData) {
     }
   }
 
-  // 2. Draw eye landmarks as small dots
-  if (Array.isArray(gd.eyeLandmarks)) {
-    for (const [x, y] of gd.eyeLandmarks) {
-      svgParts.push(
-        `<circle cx="${x}" cy="${y}" r="2" fill="#ff4444" stroke="none"/>`
-      );
+  // 2. Draw left eye landmarks (cyan) + contour
+  if (Array.isArray(gd.leftEyeLandmarks) && gd.leftEyeLandmarks.length > 0) {
+    for (const [x, y] of gd.leftEyeLandmarks) {
+      svgParts.push(`<circle cx="${x}" cy="${y}" r="2" fill="#00ccff" stroke="none"/>`);
     }
-    // Draw eye contour as polyline
-    if (gd.eyeLandmarks.length > 2) {
-      const polyPoints = gd.eyeLandmarks.map(([x, y]) => `${x},${y}`).join(' ');
-      svgParts.push(
-        `<polyline points="${polyPoints}" fill="none" stroke="#ff4444" stroke-width="1" opacity="0.6"/>`
-      );
+    if (gd.leftEyeLandmarks.length > 2) {
+      const pts = gd.leftEyeLandmarks.map(([x, y]) => `${x},${y}`).join(' ');
+      svgParts.push(`<polyline points="${pts}" fill="none" stroke="#00ccff" stroke-width="1" opacity="0.6"/>`);
     }
   }
 
-  // 3. Draw patch bounding box
-  if (gd.patchBox) {
-    const pb = gd.patchBox;
+  // 3. Draw right eye landmarks (magenta) + contour
+  if (Array.isArray(gd.rightEyeLandmarks) && gd.rightEyeLandmarks.length > 0) {
+    for (const [x, y] of gd.rightEyeLandmarks) {
+      svgParts.push(`<circle cx="${x}" cy="${y}" r="2" fill="#ff00cc" stroke="none"/>`);
+    }
+    if (gd.rightEyeLandmarks.length > 2) {
+      const pts = gd.rightEyeLandmarks.map(([x, y]) => `${x},${y}`).join(' ');
+      svgParts.push(`<polyline points="${pts}" fill="none" stroke="#ff00cc" stroke-width="1" opacity="0.6"/>`);
+    }
+  }
+
+  // 4. Draw left eye patch box (cyan dashed)
+  if (gd.leftEyeBox) {
+    const pb = gd.leftEyeBox;
     svgParts.push(
       `<rect x="${pb.x}" y="${pb.y}" width="${pb.width}" height="${pb.height}" ` +
-      `fill="none" stroke="${patchColor}" stroke-width="3" stroke-dasharray="8,4"/>`
+      `fill="none" stroke="#00ccff" stroke-width="2" stroke-dasharray="6,3"/>`
     );
-    const patchLabel = isBase ? 'TARGET patch' : 'SOURCE patch';
+    const boxLabel = isBase ? 'L_EYE target' : 'L_EYE source';
     svgParts.push(
-      `<text x="${pb.x + 4}" y="${pb.y - 6}" font-size="14" font-family="monospace" ` +
-      `fill="${patchColor}" font-weight="bold">${patchLabel}</text>`
+      `<text x="${pb.x + 3}" y="${pb.y - 4}" font-size="11" font-family="monospace" ` +
+      `fill="#00ccff" font-weight="bold">${boxLabel}</text>`
     );
   }
 
-  // 4. Role label at top-left
+  // 5. Draw right eye patch box (magenta dashed)
+  if (gd.rightEyeBox) {
+    const pb = gd.rightEyeBox;
+    svgParts.push(
+      `<rect x="${pb.x}" y="${pb.y}" width="${pb.width}" height="${pb.height}" ` +
+      `fill="none" stroke="#ff00cc" stroke-width="2" stroke-dasharray="6,3"/>`
+    );
+    const boxLabel = isBase ? 'R_EYE target' : 'R_EYE source';
+    svgParts.push(
+      `<text x="${pb.x + 3}" y="${pb.y - 4}" font-size="11" font-family="monospace" ` +
+      `fill="#ff00cc" font-weight="bold">${boxLabel}</text>`
+    );
+  }
+
+  // 6. Role label at top-left
   svgParts.push(
     `<rect x="0" y="0" width="${label.length * 10 + 16}" height="28" fill="rgba(0,0,0,0.7)"/>` +
     `<text x="8" y="20" font-size="16" font-family="monospace" fill="white" font-weight="bold">${label}</text>`
   );
 
-  // 5. Transform info (on base image only)
-  if (isBase && gd.transform) {
-    const t = gd.transform;
-    const info = `scale=${t.scale} rot=${Math.round(t.rotation * 180 / Math.PI * 10) / 10}° tx=${t.translateX} ty=${t.translateY}`;
-    svgParts.push(
-      `<rect x="0" y="${h - 28}" width="${info.length * 8 + 16}" height="28" fill="rgba(0,0,0,0.7)"/>` +
-      `<text x="8" y="${h - 8}" font-size="13" font-family="monospace" fill="#aaaaaa">${info}</text>`
-    );
+  // 7. Transform info (on base image only) — show per-eye transforms
+  if (isBase) {
+    const lines = [];
+    if (gd.leftTransform) {
+      const t = gd.leftTransform;
+      lines.push(`L: s=${t.scale} r=${Math.round(t.rotation*180/Math.PI*10)/10}° tx=${t.translateX} ty=${t.translateY}`);
+    }
+    if (gd.rightTransform) {
+      const t = gd.rightTransform;
+      lines.push(`R: s=${t.scale} r=${Math.round(t.rotation*180/Math.PI*10)/10}° tx=${t.translateX} ty=${t.translateY}`);
+    }
+    for (let li = 0; li < lines.length; li++) {
+      const y = h - 28 * (lines.length - li);
+      svgParts.push(
+        `<rect x="0" y="${y}" width="${lines[li].length * 7.5 + 16}" height="26" fill="rgba(0,0,0,0.7)"/>` +
+        `<text x="8" y="${y + 18}" font-size="12" font-family="monospace" fill="#aaaaaa">${lines[li]}</text>`
+      );
+    }
   }
 
   const svgOverlay = Buffer.from(
