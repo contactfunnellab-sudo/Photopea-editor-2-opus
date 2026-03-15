@@ -85,7 +85,9 @@
               "properties": {
                 "expandPx": { "type": "number", "minimum": 0, "default": 2 },
                 "smoothPx": { "type": "number", "minimum": 0, "default": 1 },
-                "featherRadius": { "type": "number", "minimum": 0, "maximum": 50, "default": 5 }
+                "featherRadius": { "type": "number", "minimum": 0, "maximum": 50, "default": 5, "description": "Source-side feather: softens the edge when copying from the reference image" },
+                "maskFeatherRadius": { "type": "number", "minimum": 0, "maximum": 50, "default": 1, "description": "Target-shape mask feather: softens the boundary where the clipped donor meets the base face. Separate from source featherRadius." },
+                "opacity": { "type": "number", "minimum": 0, "maximum": 100, "default": 100 }
               }
             }
           }
@@ -221,11 +223,13 @@
       "5. For EACH selectionPrimitive separately:",
       "   a. Activate reference layer",
       "   b. doc.selection.select(primitive.source.points) — polygon path",
-      "   c. doc.selection.feather(blend.featherRadius)",
+      "   c. doc.selection.feather(blend.featherRadius) — source-side feather",
       "   d. Copy and paste as new layer",
       "   e. Name layer 'Feature: {label}'",
-      "   f. Apply placement transform (translate, rotate, scale)",
-      "   g. Deselect",
+      "   f. If target.points exist: non-uniform resize(scaleXPct, scaleYPct) from source/target bbox ratios; else uniform scale",
+      "   g. Apply rotation and translation from placementTransform",
+      "   h. If target.points exist: select target polygon, feather(maskFeatherRadius), invert, cut — clips donor to target eye shape",
+      "   i. Deselect",
       "6. Hide reference layer (preserved in PSD for debug)",
       "7. Export final png",
       "8. Export PSD if debugExport=true"
