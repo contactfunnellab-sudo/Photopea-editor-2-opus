@@ -147,27 +147,19 @@ function computeBBox(points) {
  * Each primitive is executed SEPARATELY — not merged.
  * Each feature gets its own layer.
  *
- * V1 = polygon path selection (doc.selection.select with point arrays).
- * V2 = adds target-shape masking + non-uniform scale for realism:
- *   - After paste+transform, clips donor pixels to prim.target.points polygon
- *   - Derives scaleX/scaleY internally from source vs target bounding boxes
+ * Default execution path (fitMode="similarity", maskMode="none"):
+ *   1. Select source polygon on reference layer
+ *   2. Feather source selection
+ *   3. Copy and paste as new layer
+ *   4. Apply uniform scale + rotation + translation from placementTransform
+ *   5. No target clipping — donor blends naturally via feathered edges
  *
- * NOTE: The server contract (validateTransferPayload) already REQUIRES
- * target.points with >= 3 points. The hasTgtPoints guard in this code is
- * purely defensive — it prevents a crash if the executor is called outside
- * the normal server validation path, but that is not a tested/supported flow.
- *
- * WHY target masking: The old path pasted the donor eye with its own eyelid
- * contour intact. target.points (computed by MediaPipe, representing the
- * BASE face's eye shape) were already in the payload but never used for
- * compositing. Clipping to target.points makes the visible eye conform to
- * the base face's eyelid opening, corner angle, and aperture.
- *
- * WHY non-uniform scale: Uniform scale preserves the donor eye's aspect ratio,
- * but the base face may have a different eye width:height ratio. Deriving
- * separate scaleX/scaleY from source vs target bounding boxes is a lightweight
- * approximation (not a true warp) that adapts the donor to the target's
- * proportions. The values are computed internally — not read from the payload.
+ * Optional modes (set per-primitive):
+ *   fitMode="non_uniform_bbox" — derive scaleX/scaleY from source vs target
+ *     bounding boxes. Adapts donor aspect ratio to target, but can distort.
+ *   maskMode="target_polygon" — clip donor to target eye polygon via
+ *     select → invert → cut. Forces conformance to base eyelid shape,
+ *     but can create uncanny hard clips.
  */
 function buildPathTransferScript(selectionPrimitives) {
   var script = [
@@ -199,13 +191,15 @@ function buildPathTransferScript(selectionPrimitives) {
     var hasTgtPoints = prim.target && Array.isArray(prim.target.points) && prim.target.points.length >= 3;
     var tgtPoints = hasTgtPoints ? JSON.stringify(prim.target.points) : null;
 
-    // Non-uniform scale: derive scaleX/scaleY internally from source vs target
-    // bounding boxes. This is an approximation (not a true warp) that adapts
-    // the donor eye to the target eye's width:height ratio. The values are
-    // computed here at execution time — not read from the payload contract.
+    // ---- Fit Mode ----
+    // "similarity" (default): use placementTransform.scale uniformly.
+    //   Geometry already computed the correct scale from eye anchor pairs.
+    // "non_uniform_bbox" (opt-in): derive scaleX/scaleY from source vs target
+    //   bounding boxes. Legacy mode — can distort the eye shape.
+    var fitMode = prim.fitMode || 'similarity';
     var useShapeFit = false;
     var scaleXPct, scaleYPct;
-    if (hasTgtPoints) {
+    if (fitMode === 'non_uniform_bbox' && hasTgtPoints) {
       var srcBB = computeBBox(prim.source.points);
       var tgtBB = computeBBox(prim.target.points);
       if (srcBB.width > 1 && srcBB.height > 1 && tgtBB.width > 1 && tgtBB.height > 1) {
@@ -215,17 +209,16 @@ function buildPathTransferScript(selectionPrimitives) {
       }
     }
 
-    // Determine transfer mode for logging
-    var transferMode;
-    if (hasTgtPoints && useShapeFit) {
-      transferMode = 'mask+shape_fit';
-    } else if (hasTgtPoints) {
-      transferMode = 'mask_only';
-    } else {
-      transferMode = 'similarity_only';
-    }
+    // ---- Mask Mode ----
+    // "none" (default): no target polygon clipping. The donor patch sits
+    //   naturally with its own eyelid contour, blended via source feather.
+    // "target_polygon" (opt-in): clip donor to target eye polygon via
+    //   select → invert → cut. Legacy mode — can create uncanny hard clips.
+    var maskMode = prim.maskMode || 'none';
 
-    script.push('// Feature ' + p + ': ' + label + ' (mode=' + transferMode + ', opacity=' + opacity + ', feather=' + feather + ', maskFeather=' + maskFeather + ')');
+    var transferMode = 'fit=' + fitMode + ' mask=' + maskMode;
+
+    script.push('// Feature ' + p + ': ' + label + ' (' + transferMode + ', opacity=' + opacity + ', feather=' + feather + ')');
     script.push('doc.activeLayer = refLayer;');
     script.push('doc.selection.select(' + srcPoints + ');');
     if (feather > 0) {
@@ -241,13 +234,12 @@ function buildPathTransferScript(selectionPrimitives) {
       script.push('feat' + p + '.opacity = ' + opacity + ';');
     }
 
-    // Shape-fit: non-uniform resize derived from source vs target bounding boxes.
-    // This is an approximation — not a true warp — that adapts the donor eye
-    // to the target eye's width:height ratio. The uniform placementTransform.scale
-    // is only used if the internal bbox computation fails (degenerate geometry).
+    // Apply scale
     if (useShapeFit) {
+      // Non-uniform bbox resize (opt-in legacy mode)
       script.push('feat' + p + '.resize(' + scaleXPct + ', ' + scaleYPct + ', AnchorPosition.MIDDLECENTER);');
     } else if (scale !== 1.0) {
+      // Uniform similarity scale (default)
       var pct = Math.round(scale * 100 * 10) / 10;
       script.push('feat' + p + '.resize(' + pct + ', ' + pct + ', AnchorPosition.MIDDLECENTER);');
     }
@@ -261,20 +253,9 @@ function buildPathTransferScript(selectionPrimitives) {
 
     script.push('doc.selection.deselect();');
 
-    // TARGET-SHAPE MASKING
-    // After the donor eye is pasted and transformed into position, clip it to
-    // the target eye polygon. Without this, the donor retains its own eyelid
-    // contour and looks "pasted on." With this mask, the visible eye conforms
-    // to the base face's eyelid opening, corner angle, and aperture shape.
-    //
-    // Uses select → invert → cut because Photopea scripting does not expose
-    // a layer mask API. This is a pragmatic approach that must be verified in
-    // Photopea — invert() and cut() follow Adobe Photoshop scripting conventions
-    // but are not individually documented for Photopea. The try/catch ensures
-    // that if either call fails, the donor layer remains intact (unmasked)
-    // rather than crashing the entire transfer.
-    if (tgtPoints) {
-      script.push('// Target-shape mask: clip donor to base eye opening');
+    // TARGET-SHAPE MASKING (opt-in only when maskMode === 'target_polygon')
+    if (maskMode === 'target_polygon' && tgtPoints) {
+      script.push('// Target-shape mask: clip donor to base eye opening (opt-in)');
       script.push('try {');
       script.push('  doc.activeLayer = feat' + p + ';');
       script.push('  doc.selection.select(' + tgtPoints + ');');
@@ -332,19 +313,20 @@ window.runFeatureTransfer = function(payload) {
     // Log per-primitive transfer mode before execution
     for (var i = 0; i < count; i++) {
       var sp = payload.selectionPrimitives[i];
-      var hasTarget = sp.target && Array.isArray(sp.target.points) && sp.target.points.length >= 3;
+      var fm = sp.fitMode || 'similarity';
+      var mm = sp.maskMode || 'none';
       var mf = (sp.blend && sp.blend.maskFeatherRadius !== undefined) ? sp.blend.maskFeatherRadius : 1;
-      if (hasTarget) {
+      if (fm === 'non_uniform_bbox' && sp.target && Array.isArray(sp.target.points) && sp.target.points.length >= 3) {
         var sBB = computeBBox(sp.source.points);
         var tBB = computeBBox(sp.target.points);
-        logs.push('prim[' + i + '] ' + (sp.label || '?') + ': mode=mask+shape_fit'
+        logs.push('prim[' + i + '] ' + (sp.label || '?') + ': fit=' + fm + ' mask=' + mm
           + ' srcBB=' + Math.round(sBB.width) + 'x' + Math.round(sBB.height)
           + ' tgtBB=' + Math.round(tBB.width) + 'x' + Math.round(tBB.height)
           + ' scaleX=' + (Math.round((tBB.width / sBB.width) * 1000) / 1000)
           + ' scaleY=' + (Math.round((tBB.height / sBB.height) * 1000) / 1000)
           + ' maskFeather=' + mf);
       } else {
-        logs.push('prim[' + i + '] ' + (sp.label || '?') + ': mode=similarity_only');
+        logs.push('prim[' + i + '] ' + (sp.label || '?') + ': fit=' + fm + ' mask=' + mm);
       }
     }
     logs.push('Executing path-based transfer (' + count + ' primitive' + (count > 1 ? 's' : '') + ')...');
