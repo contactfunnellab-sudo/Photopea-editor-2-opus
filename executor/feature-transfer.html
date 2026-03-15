@@ -150,18 +150,24 @@ function computeBBox(points) {
  * V1 = polygon path selection (doc.selection.select with point arrays).
  * V2 = adds target-shape masking + non-uniform scale for realism:
  *   - After paste+transform, clips donor pixels to prim.target.points polygon
- *   - Uses bbox-derived scaleX/scaleY instead of uniform scale
- *   - Falls back to V1 behavior if target.points are missing
+ *   - Derives scaleX/scaleY internally from source vs target bounding boxes
+ *
+ * NOTE: The server contract (validateTransferPayload) already REQUIRES
+ * target.points with >= 3 points. The hasTgtPoints guard in this code is
+ * purely defensive — it prevents a crash if the executor is called outside
+ * the normal server validation path, but that is not a tested/supported flow.
  *
  * WHY target masking: The old path pasted the donor eye with its own eyelid
- * contour intact. A skilled manual editor constrains the donor to match the
- * BASE face's eyelid opening, corner angle, and aperture. target.points
- * already exist in the payload (computed by MediaPipe) but were never used.
+ * contour intact. target.points (computed by MediaPipe, representing the
+ * BASE face's eye shape) were already in the payload but never used for
+ * compositing. Clipping to target.points makes the visible eye conform to
+ * the base face's eyelid opening, corner angle, and aperture.
  *
  * WHY non-uniform scale: Uniform scale preserves the donor eye's aspect ratio,
- * but the base face may have a wider or narrower eye. Deriving separate
- * scaleX/scaleY from source vs target bounding boxes makes the donor conform
- * to the target eye's width:height proportions.
+ * but the base face may have a different eye width:height ratio. Deriving
+ * separate scaleX/scaleY from source vs target bounding boxes is a lightweight
+ * approximation (not a true warp) that adapts the donor to the target's
+ * proportions. The values are computed internally — not read from the payload.
  */
 function buildPathTransferScript(selectionPrimitives) {
   var script = [
@@ -193,10 +199,10 @@ function buildPathTransferScript(selectionPrimitives) {
     var hasTgtPoints = prim.target && Array.isArray(prim.target.points) && prim.target.points.length >= 3;
     var tgtPoints = hasTgtPoints ? JSON.stringify(prim.target.points) : null;
 
-    // Non-uniform scale: derive scaleX/scaleY from source vs target bounding boxes.
-    // This makes the donor eye match the target eye's width:height proportions
-    // instead of preserving the donor's own aspect ratio (which looks unnatural
-    // when the base face has a different eye shape).
+    // Non-uniform scale: derive scaleX/scaleY internally from source vs target
+    // bounding boxes. This is an approximation (not a true warp) that adapts
+    // the donor eye to the target eye's width:height ratio. The values are
+    // computed here at execution time — not read from the payload contract.
     var useShapeFit = false;
     var scaleXPct, scaleYPct;
     if (hasTgtPoints) {
@@ -235,10 +241,10 @@ function buildPathTransferScript(selectionPrimitives) {
       script.push('feat' + p + '.opacity = ' + opacity + ';');
     }
 
-    // Shape-fit: non-uniform resize when target.points are available.
-    // Uses bbox-derived scaleX/scaleY so the donor eye matches the target
-    // eye's width:height ratio. Falls back to uniform placementTransform.scale
-    // when target.points are missing (backward compatible).
+    // Shape-fit: non-uniform resize derived from source vs target bounding boxes.
+    // This is an approximation — not a true warp — that adapts the donor eye
+    // to the target eye's width:height ratio. The uniform placementTransform.scale
+    // is only used if the internal bbox computation fails (degenerate geometry).
     if (useShapeFit) {
       script.push('feat' + p + '.resize(' + scaleXPct + ', ' + scaleYPct + ', AnchorPosition.MIDDLECENTER);');
     } else if (scale !== 1.0) {
@@ -261,9 +267,12 @@ function buildPathTransferScript(selectionPrimitives) {
     // contour and looks "pasted on." With this mask, the visible eye conforms
     // to the base face's eyelid opening, corner angle, and aperture shape.
     //
-    // Uses select → invert → cut because Photopea scripting does not support
-    // layer mask creation. The try/catch ensures graceful degradation: if
-    // invert() or cut() fails, the donor layer remains intact (unmasked).
+    // Uses select → invert → cut because Photopea scripting does not expose
+    // a layer mask API. This is a pragmatic approach that must be verified in
+    // Photopea — invert() and cut() follow Adobe Photoshop scripting conventions
+    // but are not individually documented for Photopea. The try/catch ensures
+    // that if either call fails, the donor layer remains intact (unmasked)
+    // rather than crashing the entire transfer.
     if (tgtPoints) {
       script.push('// Target-shape mask: clip donor to base eye opening');
       script.push('try {');
