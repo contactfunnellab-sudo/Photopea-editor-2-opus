@@ -80,14 +80,26 @@
                 "scale": { "type": "number", "default": 1.0, "description": "Uniform scale factor (from anchor pairs)" }
               }
             },
+            "fitMode": {
+              "type": "string",
+              "enum": ["similarity", "non_uniform_bbox"],
+              "default": "similarity",
+              "description": "Scale mode. 'similarity' (default) uses placementTransform.scale uniformly. 'non_uniform_bbox' (experimental) derives scaleX/scaleY from source vs target bounding boxes."
+            },
+            "maskMode": {
+              "type": "string",
+              "enum": ["none", "target_polygon"],
+              "default": "none",
+              "description": "Mask mode. 'none' (default) applies no target clipping. 'target_polygon' (experimental) clips donor to target polygon via select/invert/cut."
+            },
             "blend": {
               "type": "object",
               "properties": {
                 "expandPx": { "type": "number", "minimum": 0, "default": 2 },
                 "smoothPx": { "type": "number", "minimum": 0, "default": 1 },
                 "featherRadius": { "type": "number", "minimum": 0, "maximum": 50, "default": 5, "description": "Source-side feather: softens the edge when copying from the reference image" },
-                "maskFeatherRadius": { "type": "number", "minimum": 0, "maximum": 50, "default": 1, "description": "Target-shape mask feather: softens the boundary where the clipped donor meets the base face. Separate from source featherRadius." },
-                "opacity": { "type": "number", "minimum": 0, "maximum": 100, "default": 100 }
+                "maskFeatherRadius": { "type": "number", "minimum": 0, "maximum": 50, "default": 1, "description": "Target-shape mask feather (only used when maskMode='target_polygon'). Softens the boundary where the clipped donor meets the base face." },
+                "opacity": { "type": "number", "minimum": 0, "maximum": 100, "default": 97 }
               }
             }
           }
@@ -226,10 +238,11 @@
       "   c. doc.selection.feather(blend.featherRadius) — source-side feather",
       "   d. Copy and paste as new layer",
       "   e. Name layer 'Feature: {label}'",
-      "   f. If target.points exist: non-uniform resize(scaleXPct, scaleYPct) from source/target bbox ratios; else uniform scale",
-      "   g. Apply rotation and translation from placementTransform",
-      "   h. If target.points exist: select target polygon, feather(maskFeatherRadius), invert, cut — clips donor to target eye shape",
-      "   i. Deselect",
+      "   f. Apply opacity from blend.opacity",
+      "   g. Apply uniform scale from placementTransform.scale (default) OR non-uniform bbox resize if fitMode='non_uniform_bbox'",
+      "   h. Apply rotation and translation from placementTransform",
+      "   i. If maskMode='target_polygon': select target polygon, feather, invert, cut (opt-in only)",
+      "   j. Deselect",
       "6. Hide reference layer (preserved in PSD for debug)",
       "7. Export final png",
       "8. Export PSD if debugExport=true"

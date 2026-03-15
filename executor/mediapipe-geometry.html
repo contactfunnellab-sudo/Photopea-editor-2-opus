@@ -124,23 +124,23 @@ function roundPoints(points) {
   return points.map(([x, y]) => [Math.round(x * 10) / 10, Math.round(y * 10) / 10]);
 }
 
-// Eyelid-aware asymmetric expand for a single eye
+// Eyelid-aware asymmetric expand for a single eye.
+// Margins are sized to capture surrounding skin for a smooth blend zone
+// while staying local to the eye region (not a large face patch).
+// - top: captures upper eyelid fold + brow transition
+// - bottom: captures lower lid + under-eye skin
+// - horizontal: captures inner/outer eye corners with blend room
 function processEyePoints(rawPoints) {
-  // Compute eye dimensions from raw landmarks
   const bb = boundingBox(rawPoints);
   const eyeW = bb.width;
   const eyeH = bb.height;
 
-  // Asymmetric margins scaled from eye size:
-  // - top: strongest (capture upper eyelid fold + brow transition)
-  // - bottom: moderate (lower lid + under-eye)
-  // - horizontal: mild
-  const topMargin = Math.max(3, Math.round(eyeH * 0.6));
-  const bottomMargin = Math.max(2, Math.round(eyeH * 0.4));
-  const hMargin = Math.max(2, Math.round(eyeW * 0.08));
+  const topMargin = Math.max(4, Math.round(eyeH * 0.85));
+  const bottomMargin = Math.max(3, Math.round(eyeH * 0.55));
+  const hMargin = Math.max(3, Math.round(eyeW * 0.15));
 
   let pts = expandPointsAsymmetric(rawPoints, topMargin, bottomMargin, hMargin, hMargin);
-  pts = chaikinSmooth(pts, 1);
+  pts = chaikinSmooth(pts, 2);
   pts = ensureClosed(pts);
   pts = roundPoints(pts);
   return pts;
@@ -266,17 +266,28 @@ function eyeAspectRatio(leftEyePoints, rightEyePoints) {
 }
 
 // ---- Blend Policy ----
+// Feather radius is proportional to the processed patch width, not a fixed
+// pixel value. This ensures the blend zone scales with the eye/image size.
+// Opacity is slightly softened (97%) as a low-risk way to reduce harsh
+// donor-vs-base tonal contrast. This is NOT a substitute for true color
+// matching — it is a conservative structural improvement.
 
-function eyeBlendPolicy(transform, overallConfidence) {
-  let opacity = 100;
-  let featherRadius = 2;
+function eyeBlendPolicy(transform, overallConfidence, processedPathPoints) {
+  let opacity = 97;
+
+  // Size-aware feather: 7% of processed patch width, clamped to [3, 6]
+  const patchBB = boundingBox(processedPathPoints);
+  let featherRadius = Math.round(patchBB.width * 0.07);
+  featherRadius = Math.max(3, Math.min(6, featherRadius));
 
   const scaleDelta = Math.abs((transform.scale || 1.0) - 1.0);
   const rotationDeg = Math.abs((transform.rotation || 0) * 180 / Math.PI);
 
   if (overallConfidence < 0.6 || scaleDelta > 0.15 || rotationDeg > 5) {
-    featherRadius = 3;
+    featherRadius = Math.min(featherRadius + 1, 7);
+    opacity = 96;
   }
+
   return { opacity, featherRadius };
 }
 
@@ -418,15 +429,22 @@ window.detectEyeGeometry = async function(baseUrl, refUrl, baseFaceHint, refFace
   const refRightOuter = getAnchorPoint(refFaceLm, EYE_ANCHORS.rightOuterCorner, refW, refH);
 
   // ---- Per-eye transforms ----
+  // Translation must use the PROCESSED path shapes (expanded + smoothed) because
+  // those are the actual polygons the executor copies and pastes. Using raw eye
+  // points for translation would offset the patch, since the expanded patch
+  // centroid differs from the raw eye centroid.
+  // Rotation and scale still use raw anchor corners (eye corners) which are
+  // stable anatomical landmarks unaffected by the expansion margins.
+  //
   // Left eye: anchor pair = leftOuterCorner → leftInnerCorner
   const leftTransform = computePerEyeTransform(
-    refLeftRaw, baseLeftRaw,
+    refLeftPath, baseLeftPath,
     refLeftOuter, refLeftInner,
     baseLeftOuter, baseLeftInner
   );
   // Right eye: anchor pair = rightInnerCorner → rightOuterCorner
   const rightTransform = computePerEyeTransform(
-    refRightRaw, baseRightRaw,
+    refRightPath, baseRightPath,
     refRightInner, refRightOuter,
     baseRightInner, baseRightOuter
   );
@@ -441,8 +459,8 @@ window.detectEyeGeometry = async function(baseUrl, refUrl, baseFaceHint, refFace
   confidence = Math.max(0, Math.round(confidence * 100) / 100);
 
   // ---- Blend policy per eye ----
-  const leftBlend = eyeBlendPolicy(leftTransform, confidence);
-  const rightBlend = eyeBlendPolicy(rightTransform, confidence);
+  const leftBlend = eyeBlendPolicy(leftTransform, confidence, refLeftPath);
+  const rightBlend = eyeBlendPolicy(rightTransform, confidence, refRightPath);
 
   // ---- Eye aspect ratio for blink detection ----
   const baseEAR = eyeAspectRatio(baseLeftRaw, baseRightRaw);
