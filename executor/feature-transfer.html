@@ -127,11 +127,41 @@ function buildStackScript() {
 }
 
 /**
+ * Compute bounding box {width, height} from a point array [[x,y], ...].
+ * Used to derive non-uniform scaleX/scaleY from source vs target dimensions.
+ * Runs in the browser page context (not inside Photopea script).
+ */
+function computeBBox(points) {
+  var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (var i = 0; i < points.length; i++) {
+    if (points[i][0] < minX) minX = points[i][0];
+    if (points[i][1] < minY) minY = points[i][1];
+    if (points[i][0] > maxX) maxX = points[i][0];
+    if (points[i][1] > maxY) maxY = points[i][1];
+  }
+  return { width: maxX - minX, height: maxY - minY };
+}
+
+/**
  * Build Photopea script for path-based feature transfer.
  * Each primitive is executed SEPARATELY — not merged.
  * Each feature gets its own layer.
  *
  * V1 = polygon path selection (doc.selection.select with point arrays).
+ * V2 = adds target-shape masking + non-uniform scale for realism:
+ *   - After paste+transform, clips donor pixels to prim.target.points polygon
+ *   - Uses bbox-derived scaleX/scaleY instead of uniform scale
+ *   - Falls back to V1 behavior if target.points are missing
+ *
+ * WHY target masking: The old path pasted the donor eye with its own eyelid
+ * contour intact. A skilled manual editor constrains the donor to match the
+ * BASE face's eyelid opening, corner angle, and aperture. target.points
+ * already exist in the payload (computed by MediaPipe) but were never used.
+ *
+ * WHY non-uniform scale: Uniform scale preserves the donor eye's aspect ratio,
+ * but the base face may have a wider or narrower eye. Deriving separate
+ * scaleX/scaleY from source vs target bounding boxes makes the donor conform
+ * to the target eye's width:height proportions.
  */
 function buildPathTransferScript(selectionPrimitives) {
   var script = [
@@ -155,7 +185,41 @@ function buildPathTransferScript(selectionPrimitives) {
     var scale = (prim.placementTransform && prim.placementTransform.scale) || 1.0;
     var rotation = (prim.placementTransform && prim.placementTransform.rotation) || 0;
 
-    script.push('// Feature ' + p + ': ' + label + ' (opacity=' + opacity + ', feather=' + feather + ')');
+    // Target-shape masking: feather for the mask edge (separate from source feather).
+    // Source feather softens the copied donor edge during copy.
+    // Mask feather softens the boundary where the clipped donor meets the base face.
+    var maskFeather = (prim.blend && prim.blend.maskFeatherRadius !== undefined)
+      ? prim.blend.maskFeatherRadius : 1;
+    var hasTgtPoints = prim.target && Array.isArray(prim.target.points) && prim.target.points.length >= 3;
+    var tgtPoints = hasTgtPoints ? JSON.stringify(prim.target.points) : null;
+
+    // Non-uniform scale: derive scaleX/scaleY from source vs target bounding boxes.
+    // This makes the donor eye match the target eye's width:height proportions
+    // instead of preserving the donor's own aspect ratio (which looks unnatural
+    // when the base face has a different eye shape).
+    var useShapeFit = false;
+    var scaleXPct, scaleYPct;
+    if (hasTgtPoints) {
+      var srcBB = computeBBox(prim.source.points);
+      var tgtBB = computeBBox(prim.target.points);
+      if (srcBB.width > 1 && srcBB.height > 1 && tgtBB.width > 1 && tgtBB.height > 1) {
+        scaleXPct = Math.round((tgtBB.width / srcBB.width) * 100 * 10) / 10;
+        scaleYPct = Math.round((tgtBB.height / srcBB.height) * 100 * 10) / 10;
+        useShapeFit = true;
+      }
+    }
+
+    // Determine transfer mode for logging
+    var transferMode;
+    if (hasTgtPoints && useShapeFit) {
+      transferMode = 'mask+shape_fit';
+    } else if (hasTgtPoints) {
+      transferMode = 'mask_only';
+    } else {
+      transferMode = 'similarity_only';
+    }
+
+    script.push('// Feature ' + p + ': ' + label + ' (mode=' + transferMode + ', opacity=' + opacity + ', feather=' + feather + ', maskFeather=' + maskFeather + ')');
     script.push('doc.activeLayer = refLayer;');
     script.push('doc.selection.select(' + srcPoints + ');');
     if (feather > 0) {
@@ -171,8 +235,13 @@ function buildPathTransferScript(selectionPrimitives) {
       script.push('feat' + p + '.opacity = ' + opacity + ';');
     }
 
-    // Apply similarity transform: scale first, then rotate, then translate
-    if (scale !== 1.0) {
+    // Shape-fit: non-uniform resize when target.points are available.
+    // Uses bbox-derived scaleX/scaleY so the donor eye matches the target
+    // eye's width:height ratio. Falls back to uniform placementTransform.scale
+    // when target.points are missing (backward compatible).
+    if (useShapeFit) {
+      script.push('feat' + p + '.resize(' + scaleXPct + ', ' + scaleYPct + ', AnchorPosition.MIDDLECENTER);');
+    } else if (scale !== 1.0) {
       var pct = Math.round(scale * 100 * 10) / 10;
       script.push('feat' + p + '.resize(' + pct + ', ' + pct + ', AnchorPosition.MIDDLECENTER);');
     }
@@ -185,6 +254,32 @@ function buildPathTransferScript(selectionPrimitives) {
     }
 
     script.push('doc.selection.deselect();');
+
+    // TARGET-SHAPE MASKING
+    // After the donor eye is pasted and transformed into position, clip it to
+    // the target eye polygon. Without this, the donor retains its own eyelid
+    // contour and looks "pasted on." With this mask, the visible eye conforms
+    // to the base face's eyelid opening, corner angle, and aperture shape.
+    //
+    // Uses select → invert → cut because Photopea scripting does not support
+    // layer mask creation. The try/catch ensures graceful degradation: if
+    // invert() or cut() fails, the donor layer remains intact (unmasked).
+    if (tgtPoints) {
+      script.push('// Target-shape mask: clip donor to base eye opening');
+      script.push('try {');
+      script.push('  doc.activeLayer = feat' + p + ';');
+      script.push('  doc.selection.select(' + tgtPoints + ');');
+      if (maskFeather > 0) {
+        script.push('  try { doc.selection.feather(' + maskFeather + '); } catch(e) {}');
+      }
+      script.push('  doc.selection.invert();');
+      script.push('  doc.selection.cut();');
+      script.push('  doc.selection.deselect();');
+      script.push('} catch(maskErr) {');
+      script.push('  try { doc.selection.deselect(); } catch(e) {}');
+      script.push('}');
+    }
+
     script.push('');
   }
 
@@ -225,6 +320,24 @@ window.runFeatureTransfer = function(payload) {
   }).then(function() {
     logs.push('Stacked (' + (Date.now() - t0) + 'ms)');
     var count = payload.selectionPrimitives.length;
+    // Log per-primitive transfer mode before execution
+    for (var i = 0; i < count; i++) {
+      var sp = payload.selectionPrimitives[i];
+      var hasTarget = sp.target && Array.isArray(sp.target.points) && sp.target.points.length >= 3;
+      var mf = (sp.blend && sp.blend.maskFeatherRadius !== undefined) ? sp.blend.maskFeatherRadius : 1;
+      if (hasTarget) {
+        var sBB = computeBBox(sp.source.points);
+        var tBB = computeBBox(sp.target.points);
+        logs.push('prim[' + i + '] ' + (sp.label || '?') + ': mode=mask+shape_fit'
+          + ' srcBB=' + Math.round(sBB.width) + 'x' + Math.round(sBB.height)
+          + ' tgtBB=' + Math.round(tBB.width) + 'x' + Math.round(tBB.height)
+          + ' scaleX=' + (Math.round((tBB.width / sBB.width) * 1000) / 1000)
+          + ' scaleY=' + (Math.round((tBB.height / sBB.height) * 1000) / 1000)
+          + ' maskFeather=' + mf);
+      } else {
+        logs.push('prim[' + i + '] ' + (sp.label || '?') + ': mode=similarity_only');
+      }
+    }
     logs.push('Executing path-based transfer (' + count + ' primitive' + (count > 1 ? 's' : '') + ')...');
     return postAndWait(buildPathTransferScript(payload.selectionPrimitives));
   }).then(function() {
