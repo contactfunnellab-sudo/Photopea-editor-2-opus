@@ -220,7 +220,68 @@ app.post('/api/feature-swap', async (req, res) => {
 // =============================================
 // MediaPipe Geometry — Browser-side Face Mesh
 // for deterministic eye landmark detection
+//
+// RESPONSE SCHEMA HISTORY:
+//   Old format: result.eyeGeometry = { transform, confidence, featherRadius,
+//     source: { rawPoints, pathPoints, boundingBox },
+//     target: { rawPoints, pathPoints, boundingBox } }
+//   New format (canonical): result.features = [
+//     { name: 'left_eye', source: {...}, target: {...},
+//       placementTransform: {...}, recommendedBlend: {...} },
+//     { name: 'right_eye', ... } ]
+//
+// The old format returned a single merged eye band. The new format returns
+// separate per-eye primitives with per-eye transforms. The server previously
+// crashed on the new format because success-path logging assumed
+// result.eyeGeometry always existed (TypeError: reading 'transform' of undefined).
+//
+// normalizeGeometryResult() handles both schemas safely for logging/validation.
 // =============================================
+
+/**
+ * Normalize a geometry result into a consistent summary for logging and
+ * validation, regardless of whether the response uses the old eyeGeometry
+ * schema or the new features[] schema.
+ *
+ * Returns { schema, featureCount, summary, confidence } or throws with
+ * a clear message if neither schema is usable.
+ */
+function normalizeGeometryResult(result) {
+  // Case 1: New per-eye features[] format (canonical, preferred)
+  if (Array.isArray(result.features) && result.features.length > 0) {
+    const summaries = result.features.map(f => {
+      const t = f.placementTransform || {};
+      return f.name + ': scale=' + (t.scale || 1) +
+        ' rot=' + (t.rotation !== undefined ? (Math.round(t.rotation * 180 / Math.PI * 10) / 10) + 'deg' : '0') +
+        ' tx=' + (t.translateX || 0) + ' ty=' + (t.translateY || 0);
+    });
+    return {
+      schema: 'features',
+      featureCount: result.features.length,
+      summary: summaries.join(' | '),
+      confidence: result.confidence
+    };
+  }
+
+  // Case 2: Old merged eyeGeometry format (legacy)
+  if (result.eyeGeometry) {
+    const eg = result.eyeGeometry;
+    const t = eg.transform || {};
+    return {
+      schema: 'eyeGeometry',
+      featureCount: 1,
+      summary: 'merged-band: scale=' + (t.scale || 1) +
+        ' rot=' + (t.rotation || 0) + ' tx=' + (t.translateX || 0) + ' ty=' + (t.translateY || 0) +
+        ' feather=' + (eg.featherRadius || 'n/a') +
+        ' srcBox=' + JSON.stringify((eg.source && eg.source.boundingBox) || {}) +
+        ' tgtBox=' + JSON.stringify((eg.target && eg.target.boundingBox) || {}),
+      confidence: eg.confidence
+    };
+  }
+
+  // Case 3: Neither schema present — this is a malformed success payload
+  return null;
+}
 
 async function getGeometryPage() {
   await ensureBrowser();
@@ -275,19 +336,33 @@ app.post('/api/geometry/eye-transfer', async (req, res) => {
     result.durationMs = Date.now() - startTime;
 
     if (result.success) {
-      const eg = result.eyeGeometry;
-      const t = eg.transform;
-      console.log('[geometry] SUCCESS requestId=' + reqId +
-        ' | baseFaces=' + result.detections.baseFaces +
-        ' | refFaces=' + result.detections.referenceFaces +
-        ' | chosenBase=' + result.detections.chosenBaseFaceIndex +
-        ' | chosenRef=' + result.detections.chosenReferenceFaceIndex +
-        ' | scale=' + t.scale + ' rot=' + t.rotation + ' tx=' + t.translateX + ' ty=' + t.translateY +
-        ' | confidence=' + eg.confidence +
-        ' | feather=' + eg.featherRadius +
-        ' | srcBox=' + JSON.stringify(eg.source.boundingBox) +
-        ' | tgtBox=' + JSON.stringify(eg.target.boundingBox) +
-        ' | duration=' + result.durationMs + 'ms');
+      // Normalize handles both old eyeGeometry and new features[] schemas safely.
+      // Without this, logging code would crash when the geometry page returns
+      // the new features[] format (eyeGeometry would be undefined).
+      const norm = normalizeGeometryResult(result);
+
+      if (!norm) {
+        // success=true but neither schema is present — treat as failure
+        // so the workflow gets a clear error instead of empty data
+        console.log('[geometry] MALFORMED requestId=' + reqId +
+          ' | success=true but payload missing both features[] and eyeGeometry' +
+          ' | keys=' + Object.keys(result).join(',') +
+          ' | duration=' + result.durationMs + 'ms');
+        result.success = false;
+        result.error = 'Geometry success payload missing both eyeGeometry and features. Keys: ' + Object.keys(result).join(', ');
+      } else {
+        const det = result.detections || {};
+        console.log('[geometry] SUCCESS requestId=' + reqId +
+          ' | schema=' + norm.schema +
+          ' | features=' + norm.featureCount +
+          ' | baseFaces=' + (det.baseFaces || '?') +
+          ' | refFaces=' + (det.referenceFaces || '?') +
+          ' | chosenBase=' + (det.chosenBaseFaceIndex !== undefined ? det.chosenBaseFaceIndex : '?') +
+          ' | chosenRef=' + (det.chosenReferenceFaceIndex !== undefined ? det.chosenReferenceFaceIndex : '?') +
+          ' | ' + norm.summary +
+          ' | confidence=' + (norm.confidence || '?') +
+          ' | duration=' + result.durationMs + 'ms');
+      }
     } else {
       console.log('[geometry] FAILED requestId=' + reqId + ' | error=' + result.error +
         ' | duration=' + result.durationMs + 'ms');
