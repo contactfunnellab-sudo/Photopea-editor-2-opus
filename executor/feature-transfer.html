@@ -119,6 +119,14 @@ function buildStackScript() {
     'if (sz.w > 0 && sz.h > 0) {',
     '  refLayer.resize((refW / sz.w) * 100, (refH / sz.h) * 100);',
     '}',
+    // After resize, ensure reference layer origin is at (0,0) in document space.
+    // When base and reference have different dimensions, Photopea centers the
+    // pasted content. Without this fix, source.points (in reference-image
+    // coordinates) would select the wrong area from the offset reference layer.
+    'var rb = refLayer.bounds;',
+    'if (Number(rb[0]) !== 0 || Number(rb[1]) !== 0) {',
+    '  refLayer.translate(-Number(rb[0]), -Number(rb[1]));',
+    '}',
     'app.activeDocument = ref;',
     'ref.close(SaveOptions.DONOTSAVECHANGES);',
     'app.activeDocument = base;',
@@ -194,8 +202,10 @@ function buildPathTransferScript(selectionPrimitives) {
     // Target-shape masking: feather for the mask edge (separate from source feather).
     // Source feather softens the copied donor edge during copy.
     // Mask feather softens the boundary where the clipped donor meets the base face.
+    // Default 3px is a safe minimum; the geometry pipeline now sends a proportional
+    // value (~7% of eye width) via blend.maskFeatherRadius.
     var maskFeather = (prim.blend && prim.blend.maskFeatherRadius !== undefined)
-      ? prim.blend.maskFeatherRadius : 1;
+      ? prim.blend.maskFeatherRadius : 3;
     var hasTgtPoints = prim.target && Array.isArray(prim.target.points) && prim.target.points.length >= 3;
     var tgtPoints = hasTgtPoints ? JSON.stringify(prim.target.points) : null;
 

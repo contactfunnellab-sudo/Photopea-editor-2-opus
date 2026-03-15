@@ -267,7 +267,7 @@ function eyeAspectRatio(leftEyePoints, rightEyePoints) {
 
 // ---- Blend Policy ----
 
-function eyeBlendPolicy(transform, overallConfidence) {
+function eyeBlendPolicy(transform, overallConfidence, eyeWidth) {
   let opacity = 100;
   let featherRadius = 4;
   let maskFeatherRadius = 3;
@@ -275,6 +275,7 @@ function eyeBlendPolicy(transform, overallConfidence) {
   const scaleDelta = Math.abs((transform.scale || 1.0) - 1.0);
   const rotationDeg = Math.abs((transform.rotation || 0) * 180 / Math.PI);
 
+  // When geometry is uncertain, increase feather to hide alignment errors
   if (overallConfidence < 0.6 || scaleDelta > 0.15 || rotationDeg > 5) {
     featherRadius = 6;
     maskFeatherRadius = 4;
@@ -443,8 +444,9 @@ window.detectEyeGeometry = async function(baseUrl, refUrl, baseFaceHint, refFace
   confidence = Math.max(0, Math.round(confidence * 100) / 100);
 
   // ---- Blend policy per eye ----
-  const leftBlend = eyeBlendPolicy(leftTransform, confidence);
-  const rightBlend = eyeBlendPolicy(rightTransform, confidence);
+  // Pass source (reference) eye width so feather scales with resolution
+  const leftBlend = eyeBlendPolicy(leftTransform, confidence, refLeftBbox.width);
+  const rightBlend = eyeBlendPolicy(rightTransform, confidence, refRightBbox.width);
 
   // ---- Eye aspect ratio for blink detection ----
   const baseEAR = eyeAspectRatio(baseLeftRaw, baseRightRaw);
