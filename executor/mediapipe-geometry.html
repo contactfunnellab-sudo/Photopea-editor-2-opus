@@ -135,12 +135,12 @@ function processEyePoints(rawPoints) {
   // - top: strongest (capture upper eyelid fold + brow transition)
   // - bottom: moderate (lower lid + under-eye)
   // - horizontal: mild
-  const topMargin = Math.max(4, Math.round(eyeH * 0.8));
-  const bottomMargin = Math.max(3, Math.round(eyeH * 0.55));
-  const hMargin = Math.max(3, Math.round(eyeW * 0.18));
+  const topMargin = Math.max(3, Math.round(eyeH * 0.6));
+  const bottomMargin = Math.max(2, Math.round(eyeH * 0.4));
+  const hMargin = Math.max(2, Math.round(eyeW * 0.08));
 
   let pts = expandPointsAsymmetric(rawPoints, topMargin, bottomMargin, hMargin, hMargin);
-  pts = chaikinSmooth(pts, 2);
+  pts = chaikinSmooth(pts, 1);
   pts = ensureClosed(pts);
   pts = roundPoints(pts);
   return pts;
@@ -269,17 +269,15 @@ function eyeAspectRatio(leftEyePoints, rightEyePoints) {
 
 function eyeBlendPolicy(transform, overallConfidence) {
   let opacity = 100;
-  let featherRadius = 4;
-  let maskFeatherRadius = 3;
+  let featherRadius = 2;
 
   const scaleDelta = Math.abs((transform.scale || 1.0) - 1.0);
   const rotationDeg = Math.abs((transform.rotation || 0) * 180 / Math.PI);
 
   if (overallConfidence < 0.6 || scaleDelta > 0.15 || rotationDeg > 5) {
-    featherRadius = 6;
-    maskFeatherRadius = 4;
+    featherRadius = 3;
   }
-  return { opacity, featherRadius, maskFeatherRadius };
+  return { opacity, featherRadius };
 }
 
 // ---- Debug Rendering ----
