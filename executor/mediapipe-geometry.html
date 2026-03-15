@@ -131,22 +131,16 @@ function processEyePoints(rawPoints) {
   const eyeW = bb.width;
   const eyeH = bb.height;
 
-  // Asymmetric margins scaled from eye size.
-  // These must be LARGE enough to capture surrounding skin so the feathered
-  // edge dissolves invisibly into the base face. A tight polygon (~8% hMargin)
-  // creates a visible seam because there is no "blend zone" — the donor patch
-  // edge sits directly against base skin. A generous polygon with heavy feather
-  // means only the CENTER (the eye itself) is at full opacity.
-  //
-  // top: capture brow transition + upper lid fold (largest)
-  // bottom: capture under-eye + upper cheek
-  // horizontal: capture temple + nose bridge sides
-  const topMargin = Math.max(6, Math.round(eyeH * 1.2));
-  const bottomMargin = Math.max(4, Math.round(eyeH * 0.8));
-  const hMargin = Math.max(5, Math.round(eyeW * 0.25));
+  // Asymmetric margins scaled from eye size:
+  // - top: strongest (capture upper eyelid fold + brow transition)
+  // - bottom: moderate (lower lid + under-eye)
+  // - horizontal: mild
+  const topMargin = Math.max(4, Math.round(eyeH * 0.8));
+  const bottomMargin = Math.max(3, Math.round(eyeH * 0.55));
+  const hMargin = Math.max(3, Math.round(eyeW * 0.18));
 
   let pts = expandPointsAsymmetric(rawPoints, topMargin, bottomMargin, hMargin, hMargin);
-  pts = chaikinSmooth(pts, 1);
+  pts = chaikinSmooth(pts, 2);
   pts = ensureClosed(pts);
   pts = roundPoints(pts);
   return pts;
@@ -275,25 +269,16 @@ function eyeAspectRatio(leftEyePoints, rightEyePoints) {
 
 function eyeBlendPolicy(transform, overallConfidence, eyeWidth) {
   let opacity = 100;
-
-  // Feather must be proportional to eye size so the donor patch edge
-  // dissolves into the base face. Fixed 2-3px feather on a high-res image
-  // creates an almost hard edge — the donor region appears stamped on.
-  // ~10% of eye width gives 5-10px for typical eyes, scaling with resolution.
-  let featherRadius = Math.max(4, Math.round((eyeWidth || 50) * 0.1));
-
-  // Mask feather (target-side): softens the boundary where the clipped donor
-  // meets the base face. Slightly less than source feather to keep the eye
-  // shape defined while still blending the skin transition.
-  let maskFeatherRadius = Math.max(3, Math.round((eyeWidth || 50) * 0.07));
+  let featherRadius = 4;
+  let maskFeatherRadius = 3;
 
   const scaleDelta = Math.abs((transform.scale || 1.0) - 1.0);
   const rotationDeg = Math.abs((transform.rotation || 0) * 180 / Math.PI);
 
   // When geometry is uncertain, increase feather to hide alignment errors
   if (overallConfidence < 0.6 || scaleDelta > 0.15 || rotationDeg > 5) {
-    featherRadius = Math.round(featherRadius * 1.3);
-    maskFeatherRadius = Math.round(maskFeatherRadius * 1.3);
+    featherRadius = 6;
+    maskFeatherRadius = 4;
   }
   return { opacity, featherRadius, maskFeatherRadius };
 }
