@@ -40,6 +40,26 @@ const EYE_ANCHORS = {
   rightOuterCorner: 263
 };
 
+// Richer eye anchor set for correspondence-based transforms.
+// These go beyond corners to capture eye opening, gaze center, and vertical fit.
+// All indices are from the MediaPipe 478-point face mesh (iris-refined model).
+const EYE_DETAIL_ANCHORS = {
+  left_eye: {
+    outerCorner: 33,     // temporal corner
+    innerCorner: 133,    // nasal corner
+    upperLid: 159,       // upper eyelid apex
+    lowerLid: 145,       // lower eyelid apex
+    irisCenter: 468      // iris center (from 478-point model)
+  },
+  right_eye: {
+    innerCorner: 362,    // nasal corner
+    outerCorner: 263,    // temporal corner
+    upperLid: 386,       // upper eyelid apex
+    lowerLid: 374,       // lower eyelid apex
+    irisCenter: 473      // iris center (from 478-point model)
+  }
+};
+
 let faceLandmarker = null;
 
 async function initMediaPipe() {
@@ -140,7 +160,7 @@ function processEyePoints(rawPoints) {
   const hMargin = Math.max(3, Math.round(eyeW * 0.15));
 
   let pts = expandPointsAsymmetric(rawPoints, topMargin, bottomMargin, hMargin, hMargin);
-  pts = chaikinSmooth(pts, 2);
+  pts = chaikinSmooth(pts, 1);
   pts = ensureClosed(pts);
   pts = roundPoints(pts);
   return pts;
@@ -208,30 +228,57 @@ function selectFace(faces, hint, imgW, imgH) {
 
 // ---- Per-Eye Transform Computation ----
 
-function computePerEyeTransform(srcEyePoints, tgtEyePoints, srcAnchor1, srcAnchor2, tgtAnchor1, tgtAnchor2) {
-  // Centroid-based translation
-  const [scx, scy] = centroid(srcEyePoints);
-  const [tcx, tcy] = centroid(tgtEyePoints);
-
-  // Scale and rotation from anchor pair (corner points of this specific eye)
-  const sdx = srcAnchor2[0] - srcAnchor1[0];
-  const sdy = srcAnchor2[1] - srcAnchor1[1];
+// Correspondence-based eye transform using 5 anatomical anchors per eye.
+// Replaces the simple 2-corner transform with one that captures:
+// - Rotation: from corner-to-corner vector (anatomically stable)
+// - scaleX: from inner↔outer corner distance ratio (horizontal fit)
+// - scaleY: from upper↔lower lid distance ratio (eye opening fit)
+// - Translation: from bbox center of processed paths (matches Photopea pivot)
+function computeEnhancedEyeTransform(srcPathPoints, tgtPathPoints, srcAnchors, tgtAnchors) {
+  // --- Rotation from corner-to-corner vector ---
+  const sdx = srcAnchors.anchor2[0] - srcAnchors.anchor1[0];
+  const sdy = srcAnchors.anchor2[1] - srcAnchors.anchor1[1];
   const sDist = Math.sqrt(sdx * sdx + sdy * sdy);
   const sAngle = Math.atan2(sdy, sdx);
 
-  const tdx = tgtAnchor2[0] - tgtAnchor1[0];
-  const tdy = tgtAnchor2[1] - tgtAnchor1[1];
+  const tdx = tgtAnchors.anchor2[0] - tgtAnchors.anchor1[0];
+  const tdy = tgtAnchors.anchor2[1] - tgtAnchors.anchor1[1];
   const tDist = Math.sqrt(tdx * tdx + tdy * tdy);
   const tAngle = Math.atan2(tdy, tdx);
 
-  const rotation = sDist > 0.001 && tDist > 0.001 ? tAngle - sAngle : 0;
-  const scale = sDist > 0.001 ? tDist / sDist : 1.0;
+  const rotation = (sDist > 0.001 && tDist > 0.001) ? tAngle - sAngle : 0;
+
+  // --- Horizontal scale from corner distance ---
+  const scaleX = sDist > 0.001 ? tDist / sDist : 1.0;
+
+  // --- Vertical scale from upper↔lower lid distance (eye opening) ---
+  const srcVDist = Math.sqrt(
+    Math.pow(srcAnchors.upperLid[0] - srcAnchors.lowerLid[0], 2) +
+    Math.pow(srcAnchors.upperLid[1] - srcAnchors.lowerLid[1], 2)
+  );
+  const tgtVDist = Math.sqrt(
+    Math.pow(tgtAnchors.upperLid[0] - tgtAnchors.lowerLid[0], 2) +
+    Math.pow(tgtAnchors.upperLid[1] - tgtAnchors.lowerLid[1], 2)
+  );
+  const scaleY = srcVDist > 0.001 ? tgtVDist / srcVDist : scaleX;
+
+  // --- Translation from bbox center (matches Photopea MIDDLECENTER pivot) ---
+  // Using bbox center instead of centroid because Photopea resize/rotate
+  // pivot around the layer's bounding box center (AnchorPosition.MIDDLECENTER).
+  const srcBB = boundingBox(srcPathPoints);
+  const tgtBB = boundingBox(tgtPathPoints);
+  const srcCenterX = srcBB.x + srcBB.width / 2;
+  const srcCenterY = srcBB.y + srcBB.height / 2;
+  const tgtCenterX = tgtBB.x + tgtBB.width / 2;
+  const tgtCenterY = tgtBB.y + tgtBB.height / 2;
 
   return {
-    translateX: Math.round((tcx - scx) * 10) / 10,
-    translateY: Math.round((tcy - scy) * 10) / 10,
+    translateX: Math.round((tgtCenterX - srcCenterX) * 10) / 10,
+    translateY: Math.round((tgtCenterY - srcCenterY) * 10) / 10,
     rotation: Math.round(rotation * 1000) / 1000,
-    scale: Math.round(scale * 1000) / 1000
+    scaleX: Math.round(scaleX * 1000) / 1000,
+    scaleY: Math.round(scaleY * 1000) / 1000,
+    scale: Math.round(((scaleX + scaleY) / 2) * 1000) / 1000  // backward compat
   };
 }
 
@@ -249,6 +296,12 @@ function extractSingleEyePoints(faceLandmarks, indices, imgW, imgH) {
 }
 
 function getAnchorPoint(faceLandmarks, idx, imgW, imgH) {
+  const lm = faceLandmarks[idx];
+  return [lm.x * imgW, lm.y * imgH];
+}
+
+function getAnchorPointSafe(faceLandmarks, idx, imgW, imgH, fallback) {
+  if (idx >= faceLandmarks.length) return fallback || null;
   const lm = faceLandmarks[idx];
   return [lm.x * imgW, lm.y * imgH];
 }
@@ -417,36 +470,46 @@ window.detectEyeGeometry = async function(baseUrl, refUrl, baseFaceHint, refFace
   const refLeftBbox = boundingBox(refLeftPath);
   const refRightBbox = boundingBox(refRightPath);
 
-  // ---- Per-eye anchor points for transform ----
-  const baseLeftOuter = getAnchorPoint(baseFaceLm, EYE_ANCHORS.leftOuterCorner, baseW, baseH);
-  const baseLeftInner = getAnchorPoint(baseFaceLm, EYE_ANCHORS.leftInnerCorner, baseW, baseH);
-  const baseRightInner = getAnchorPoint(baseFaceLm, EYE_ANCHORS.rightInnerCorner, baseW, baseH);
-  const baseRightOuter = getAnchorPoint(baseFaceLm, EYE_ANCHORS.rightOuterCorner, baseW, baseH);
-
-  const refLeftOuter = getAnchorPoint(refFaceLm, EYE_ANCHORS.leftOuterCorner, refW, refH);
-  const refLeftInner = getAnchorPoint(refFaceLm, EYE_ANCHORS.leftInnerCorner, refW, refH);
-  const refRightInner = getAnchorPoint(refFaceLm, EYE_ANCHORS.rightInnerCorner, refW, refH);
-  const refRightOuter = getAnchorPoint(refFaceLm, EYE_ANCHORS.rightOuterCorner, refW, refH);
+  // ---- Extract detailed eye anchors for correspondence transform ----
+  // 5-point anchor sets: corners + upper/lower lid apex + iris center
+  const baseLeftAnchors = {
+    anchor1: getAnchorPoint(baseFaceLm, EYE_DETAIL_ANCHORS.left_eye.outerCorner, baseW, baseH),
+    anchor2: getAnchorPoint(baseFaceLm, EYE_DETAIL_ANCHORS.left_eye.innerCorner, baseW, baseH),
+    upperLid: getAnchorPoint(baseFaceLm, EYE_DETAIL_ANCHORS.left_eye.upperLid, baseW, baseH),
+    lowerLid: getAnchorPoint(baseFaceLm, EYE_DETAIL_ANCHORS.left_eye.lowerLid, baseW, baseH),
+    irisCenter: getAnchorPointSafe(baseFaceLm, EYE_DETAIL_ANCHORS.left_eye.irisCenter, baseW, baseH, centroid(baseLeftRaw))
+  };
+  const baseRightAnchors = {
+    anchor1: getAnchorPoint(baseFaceLm, EYE_DETAIL_ANCHORS.right_eye.innerCorner, baseW, baseH),
+    anchor2: getAnchorPoint(baseFaceLm, EYE_DETAIL_ANCHORS.right_eye.outerCorner, baseW, baseH),
+    upperLid: getAnchorPoint(baseFaceLm, EYE_DETAIL_ANCHORS.right_eye.upperLid, baseW, baseH),
+    lowerLid: getAnchorPoint(baseFaceLm, EYE_DETAIL_ANCHORS.right_eye.lowerLid, baseW, baseH),
+    irisCenter: getAnchorPointSafe(baseFaceLm, EYE_DETAIL_ANCHORS.right_eye.irisCenter, baseW, baseH, centroid(baseRightRaw))
+  };
+  const refLeftAnchors = {
+    anchor1: getAnchorPoint(refFaceLm, EYE_DETAIL_ANCHORS.left_eye.outerCorner, refW, refH),
+    anchor2: getAnchorPoint(refFaceLm, EYE_DETAIL_ANCHORS.left_eye.innerCorner, refW, refH),
+    upperLid: getAnchorPoint(refFaceLm, EYE_DETAIL_ANCHORS.left_eye.upperLid, refW, refH),
+    lowerLid: getAnchorPoint(refFaceLm, EYE_DETAIL_ANCHORS.left_eye.lowerLid, refW, refH),
+    irisCenter: getAnchorPointSafe(refFaceLm, EYE_DETAIL_ANCHORS.left_eye.irisCenter, refW, refH, centroid(refLeftRaw))
+  };
+  const refRightAnchors = {
+    anchor1: getAnchorPoint(refFaceLm, EYE_DETAIL_ANCHORS.right_eye.innerCorner, refW, refH),
+    anchor2: getAnchorPoint(refFaceLm, EYE_DETAIL_ANCHORS.right_eye.outerCorner, refW, refH),
+    upperLid: getAnchorPoint(refFaceLm, EYE_DETAIL_ANCHORS.right_eye.upperLid, refW, refH),
+    lowerLid: getAnchorPoint(refFaceLm, EYE_DETAIL_ANCHORS.right_eye.lowerLid, refW, refH),
+    irisCenter: getAnchorPointSafe(refFaceLm, EYE_DETAIL_ANCHORS.right_eye.irisCenter, refW, refH, centroid(refRightRaw))
+  };
 
   // ---- Per-eye transforms ----
-  // Translation must use the PROCESSED path shapes (expanded + smoothed) because
-  // those are the actual polygons the executor copies and pastes. Using raw eye
-  // points for translation would offset the patch, since the expanded patch
-  // centroid differs from the raw eye centroid.
-  // Rotation and scale still use raw anchor corners (eye corners) which are
-  // stable anatomical landmarks unaffected by the expansion margins.
-  //
-  // Left eye: anchor pair = leftOuterCorner → leftInnerCorner
-  const leftTransform = computePerEyeTransform(
-    refLeftPath, baseLeftPath,
-    refLeftOuter, refLeftInner,
-    baseLeftOuter, baseLeftInner
+  // Translation uses bbox center (matches Photopea MIDDLECENTER pivot).
+  // Rotation from corner-to-corner vector.
+  // scaleX from corner distance, scaleY from upper↔lower lid distance.
+  const leftTransform = computeEnhancedEyeTransform(
+    refLeftPath, baseLeftPath, refLeftAnchors, baseLeftAnchors
   );
-  // Right eye: anchor pair = rightInnerCorner → rightOuterCorner
-  const rightTransform = computePerEyeTransform(
-    refRightPath, baseRightPath,
-    refRightInner, refRightOuter,
-    baseRightInner, baseRightOuter
+  const rightTransform = computeEnhancedEyeTransform(
+    refRightPath, baseRightPath, refRightAnchors, baseRightAnchors
   );
 
   // ---- Confidence ----

@@ -74,10 +74,12 @@
             "placementTransform": {
               "type": "object",
               "properties": {
-                "translateX": { "type": "number", "default": 0, "description": "Horizontal translation (centroid delta)" },
-                "translateY": { "type": "number", "default": 0, "description": "Vertical translation (centroid delta)" },
-                "rotation": { "type": "number", "default": 0, "description": "Rotation in radians (from anchor pairs)" },
-                "scale": { "type": "number", "default": 1.0, "description": "Uniform scale factor (from anchor pairs)" }
+                "translateX": { "type": "number", "default": 0, "description": "Horizontal translation (bbox center delta, matches Photopea MIDDLECENTER pivot)" },
+                "translateY": { "type": "number", "default": 0, "description": "Vertical translation (bbox center delta)" },
+                "rotation": { "type": "number", "default": 0, "description": "Rotation in radians (from eye corner anchor pairs)" },
+                "scale": { "type": "number", "default": 1.0, "description": "Uniform scale factor (backward compat, average of scaleX/scaleY)" },
+                "scaleX": { "type": "number", "default": 1.0, "description": "Horizontal scale from landmark corner distance ratio. Geometry-derived, not bbox." },
+                "scaleY": { "type": "number", "default": 1.0, "description": "Vertical scale from landmark upper/lower lid distance ratio (eye opening fit). Geometry-derived, not bbox." }
               }
             },
             "fitMode": {
