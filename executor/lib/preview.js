@@ -1,12 +1,20 @@
 /**
- * Preview renderer — per-eye landmark-aware previews with face detection,
- * separate left/right eye landmarks, patch boxes, and role labels.
+ * Preview renderer — full face mesh + per-eye landmark-aware previews
+ * with face detection, patch boxes, pose info, and role labels.
  * Uses sharp SVG overlay. Lightweight, no canvas dependency.
+ *
+ * Visual layers (back to front):
+ *   1. Full face mesh points (subtle yellow) — only for selected face
+ *   2. Face bounding boxes (green=selected, gray=others)
+ *   3. Left eye landmarks (cyan) + contour
+ *   4. Right eye landmarks (magenta) + contour
+ *   5. Eye patch boxes (dashed)
+ *   6. Role label + pose info + legend
  */
 const sharp = require('sharp');
 
 /**
- * Render a per-eye landmark-aware preview image.
+ * Render a full-face-mesh + per-eye landmark-aware preview image.
  *
  * @param {Buffer} imageBuffer - source image buffer
  * @param {string} role - "base" or "reference"
@@ -19,6 +27,8 @@ const sharp = require('sharp');
  *   - rightEyeBox: {x,y,width,height} - right eye patch bounding box
  *   - leftTransform: {translateX, translateY, rotation, scale} - optional
  *   - rightTransform: {translateX, translateY, rotation, scale} - optional
+ *   - faceMesh: [[x,y],...] - full face mesh for selected face (optional)
+ *   - pose: {available, yawDeg, pitchDeg, rollDeg} - face pose (optional)
  * @returns {Promise<Buffer>} annotated PNG buffer
  */
 async function renderPreview(imageBuffer, role, geometryData) {
@@ -32,7 +42,15 @@ async function renderPreview(imageBuffer, role, geometryData) {
   const svgParts = [];
   const gd = geometryData || {};
 
-  // 1. Draw all detected face bounding boxes
+  // Layer 1: Full face mesh for selected face (subtle, behind everything)
+  // Shows ALL landmarks — gives face-relative context for eye placement.
+  if (Array.isArray(gd.faceMesh) && gd.faceMesh.length > 0) {
+    for (const [x, y] of gd.faceMesh) {
+      svgParts.push(`<circle cx="${x}" cy="${y}" r="0.8" fill="rgba(255,200,50,0.3)" stroke="none"/>`);
+    }
+  }
+
+  // Layer 2: All detected face bounding boxes
   if (Array.isArray(gd.allFaces)) {
     for (let i = 0; i < gd.allFaces.length; i++) {
       const f = gd.allFaces[i];
@@ -50,7 +68,7 @@ async function renderPreview(imageBuffer, role, geometryData) {
     }
   }
 
-  // 2. Draw left eye landmarks (cyan) + contour
+  // Layer 3: Left eye landmarks (cyan) + contour
   if (Array.isArray(gd.leftEyeLandmarks) && gd.leftEyeLandmarks.length > 0) {
     for (const [x, y] of gd.leftEyeLandmarks) {
       svgParts.push(`<circle cx="${x}" cy="${y}" r="2" fill="#00ccff" stroke="none"/>`);
@@ -61,7 +79,7 @@ async function renderPreview(imageBuffer, role, geometryData) {
     }
   }
 
-  // 3. Draw right eye landmarks (magenta) + contour
+  // Layer 4: Right eye landmarks (magenta) + contour
   if (Array.isArray(gd.rightEyeLandmarks) && gd.rightEyeLandmarks.length > 0) {
     for (const [x, y] of gd.rightEyeLandmarks) {
       svgParts.push(`<circle cx="${x}" cy="${y}" r="2" fill="#ff00cc" stroke="none"/>`);
@@ -72,7 +90,7 @@ async function renderPreview(imageBuffer, role, geometryData) {
     }
   }
 
-  // 4. Draw left eye patch box (cyan dashed)
+  // Layer 5: Eye patch boxes (dashed)
   if (gd.leftEyeBox) {
     const pb = gd.leftEyeBox;
     svgParts.push(
@@ -86,7 +104,6 @@ async function renderPreview(imageBuffer, role, geometryData) {
     );
   }
 
-  // 5. Draw right eye patch box (magenta dashed)
   if (gd.rightEyeBox) {
     const pb = gd.rightEyeBox;
     svgParts.push(
@@ -100,13 +117,40 @@ async function renderPreview(imageBuffer, role, geometryData) {
     );
   }
 
-  // 6. Role label at top-left
+  // Layer 6a: Role label at top-left
   svgParts.push(
     `<rect x="0" y="0" width="${label.length * 10 + 16}" height="28" fill="rgba(0,0,0,0.7)"/>` +
     `<text x="8" y="20" font-size="16" font-family="monospace" fill="white" font-weight="bold">${label}</text>`
   );
 
-  // 7. Transform info (on base image only) — show per-eye transforms
+  // Layer 6b: Pose info (bottom-left)
+  if (gd.pose && gd.pose.available) {
+    const p = gd.pose;
+    const poseText = `pose: yaw=${p.yawDeg} pitch=${p.pitchDeg} roll=${p.rollDeg}`;
+    const pw = poseText.length * 7.2 + 16;
+    svgParts.push(
+      `<rect x="0" y="${h - 26}" width="${pw}" height="26" fill="rgba(0,0,0,0.7)"/>` +
+      `<text x="8" y="${h - 8}" font-size="12" font-family="monospace" fill="#ffcc33">${poseText}</text>`
+    );
+  }
+
+  // Layer 6c: Legend (top-right)
+  const meshCount = Array.isArray(gd.faceMesh) ? gd.faceMesh.length : 0;
+  const legendLines = [];
+  if (meshCount > 0) legendLines.push({ color: 'rgba(255,200,50,0.7)', text: `mesh (${meshCount} pts)` });
+  legendLines.push({ color: '#00ccff', text: 'L eye' });
+  legendLines.push({ color: '#ff00cc', text: 'R eye' });
+  const lx = w - 120;
+  for (let li = 0; li < legendLines.length; li++) {
+    const ly = 4 + li * 16;
+    svgParts.push(
+      `<rect x="${lx - 4}" y="${ly}" width="124" height="15" fill="rgba(0,0,0,0.5)"/>` +
+      `<circle cx="${lx + 4}" cy="${ly + 7}" r="3" fill="${legendLines[li].color}"/>` +
+      `<text x="${lx + 12}" y="${ly + 12}" font-size="11" font-family="monospace" fill="${legendLines[li].color}">${legendLines[li].text}</text>`
+    );
+  }
+
+  // Layer 6d: Transform info (on base image only)
   if (isBase) {
     const lines = [];
     if (gd.leftTransform) {
@@ -117,8 +161,9 @@ async function renderPreview(imageBuffer, role, geometryData) {
       const t = gd.rightTransform;
       lines.push(`R: s=${t.scale} r=${Math.round(t.rotation*180/Math.PI*10)/10}° tx=${t.translateX} ty=${t.translateY}`);
     }
+    const bottomOffset = (gd.pose && gd.pose.available) ? 28 : 0;
     for (let li = 0; li < lines.length; li++) {
-      const y = h - 28 * (lines.length - li);
+      const y = h - bottomOffset - 28 * (lines.length - li);
       svgParts.push(
         `<rect x="0" y="${y}" width="${lines[li].length * 7.5 + 16}" height="26" fill="rgba(0,0,0,0.7)"/>` +
         `<text x="8" y="${y + 18}" font-size="12" font-family="monospace" fill="#aaaaaa">${lines[li]}</text>`

@@ -104,7 +104,11 @@ async function initMediaPipe() {
       runningMode: "IMAGE",
       numFaces: 10,
       outputFaceBlendshapes: false,
-      outputFacialTransformationMatrices: false
+      // Enabled: face transformation matrices give approximate face pose
+      // (rotation/translation in 3D). Used for pose debug diagnostics —
+      // helps determine if base/ref faces have meaningfully different
+      // orientations, which would explain placement errors.
+      outputFacialTransformationMatrices: true
     });
     statusEl.textContent = 'MediaPipe ready.';
     window.mediapipeReady = true;
@@ -568,6 +572,57 @@ function solveEyeFrameTransform(srcAnchors, tgtAnchors, srcPatchBB, faceStabiliz
   };
 }
 
+// ---- Full Face Mesh Extraction (for preview/debug) ----
+// Extracts ALL landmarks for a single face as pixel coordinates.
+// Used to draw the full face mesh in preview — gives context for
+// whether eye-relative placement makes sense within the whole face.
+function extractFullFaceMesh(faceLandmarks, imgW, imgH) {
+  const points = [];
+  for (let i = 0; i < faceLandmarks.length; i++) {
+    const lm = faceLandmarks[i];
+    points.push([
+      Math.round(lm.x * imgW * 10) / 10,
+      Math.round(lm.y * imgH * 10) / 10
+    ]);
+  }
+  return points;
+}
+
+// ---- Face Pose Extraction from Transformation Matrix ----
+// MediaPipe's facialTransformationMatrixes returns a 4x4 matrix per face.
+// We extract compact yaw/pitch/roll estimates for pose debugging.
+// This tells us if the face is turned/tilted — useful for understanding
+// whether placement errors come from pose mismatch between base and ref.
+//
+// WHY NOT BlazePose: BlazePose detects body pose (shoulders, hips, etc).
+// FaceLandmarker is the correct model for face-detail geometry.
+// The transformation matrix gives us face orientation without needing
+// a separate pose model.
+function extractPoseSummary(matrix) {
+  // matrix is a FaceLandmarkerResult.facialTransformationMatrixes entry
+  // which is a { rows: 4, columns: 4, data: Float32Array(16) } object
+  if (!matrix || !matrix.data || matrix.data.length < 16) {
+    return { available: false };
+  }
+  const m = matrix.data;
+  // Extract rotation from the 3x3 upper-left submatrix of the 4x4 matrix
+  // Row-major: m[0..3] = row0, m[4..7] = row1, m[8..11] = row2, m[12..15] = row3
+  // Euler angles (approximate) from rotation matrix:
+  //   pitch = asin(-m[8])  (rotation around X — nod up/down)
+  //   yaw   = atan2(m[4], m[0])  (rotation around Y — turn left/right)
+  //   roll  = atan2(m[9], m[10]) (rotation around Z — tilt head)
+  const pitch = Math.asin(-Math.max(-1, Math.min(1, m[8])));
+  const yaw = Math.atan2(m[4], m[0]);
+  const roll = Math.atan2(m[9], m[10]);
+
+  return {
+    available: true,
+    yawDeg: Math.round(yaw * 180 / Math.PI * 10) / 10,
+    pitchDeg: Math.round(pitch * 180 / Math.PI * 10) / 10,
+    rollDeg: Math.round(roll * 180 / Math.PI * 10) / 10
+  };
+}
+
 // ---- Eye Landmark Extraction (per-eye) ----
 
 function extractSingleEyePoints(faceLandmarks, indices, imgW, imgH) {
@@ -725,8 +780,20 @@ function eyeBlendPolicy(transform, overallConfidence, processedPathPoints) {
 }
 
 // ---- Debug Rendering ----
+// Draws full face mesh for selected face + eye landmarks + patch boxes.
+// The full mesh provides face-relative context — you can see whether
+// the eye positions make sense within the whole face structure, and
+// whether face pose/orientation appears correct.
+//
+// Visual layers (back to front):
+//   1. Full face mesh points (subtle yellow, small) — only for selected face
+//   2. Face bounding boxes (green=selected, gray=others)
+//   3. Left eye landmarks (cyan, larger dots + contour)
+//   4. Right eye landmarks (magenta, larger dots + contour)
+//   5. Left/right eye patch boxes (dashed)
+//   6. Role label + pose info
 
-function renderDebug(img, faces, selectedIdx, leftEyePoints, rightEyePoints, leftBbox, rightBbox, label) {
+function renderDebug(img, faces, selectedIdx, leftEyePoints, rightEyePoints, leftBbox, rightBbox, label, fullMeshPoints, poseSummary) {
   const container = document.getElementById('debug-container');
   if (!container || !window.MEDIAPIPE_DEBUG) return;
 
@@ -737,7 +804,17 @@ function renderDebug(img, faces, selectedIdx, leftEyePoints, rightEyePoints, lef
   const ctx = canvas.getContext('2d');
   ctx.drawImage(img, 0, 0);
 
-  // Draw all face bounding boxes
+  // Layer 1: Full face mesh for selected face (subtle, behind everything else)
+  // This shows ALL 478 landmarks, giving full face-relative context.
+  // Only drawn for the selected face to avoid visual clutter.
+  if (fullMeshPoints && fullMeshPoints.length > 0) {
+    ctx.fillStyle = 'rgba(255, 200, 50, 0.35)';
+    for (const [x, y] of fullMeshPoints) {
+      ctx.beginPath(); ctx.arc(x, y, 1, 0, 2 * Math.PI); ctx.fill();
+    }
+  }
+
+  // Layer 2: All face bounding boxes
   for (let i = 0; i < faces.length; i++) {
     const meta = faceArea(faces[i], img.naturalWidth, img.naturalHeight);
     ctx.strokeStyle = i === selectedIdx ? '#00ff00' : '#666666';
@@ -748,18 +825,18 @@ function renderDebug(img, faces, selectedIdx, leftEyePoints, rightEyePoints, lef
     ctx.fillText('Face ' + i + (i === selectedIdx ? ' (selected)' : ''), meta.minX, meta.minY - 4);
   }
 
-  // Draw left eye landmarks (cyan)
+  // Layer 3: Left eye landmarks (cyan, prominent)
   ctx.fillStyle = '#00ccff';
   for (const [x, y] of leftEyePoints) {
     ctx.beginPath(); ctx.arc(x, y, 2, 0, 2 * Math.PI); ctx.fill();
   }
-  // Draw right eye landmarks (magenta)
+  // Layer 4: Right eye landmarks (magenta, prominent)
   ctx.fillStyle = '#ff00cc';
   for (const [x, y] of rightEyePoints) {
     ctx.beginPath(); ctx.arc(x, y, 2, 0, 2 * Math.PI); ctx.fill();
   }
 
-  // Draw left eye patch box
+  // Layer 5: Eye patch boxes
   if (leftBbox) {
     ctx.strokeStyle = '#00ccff'; ctx.lineWidth = 2; ctx.setLineDash([6, 3]);
     ctx.strokeRect(leftBbox.x, leftBbox.y, leftBbox.width, leftBbox.height);
@@ -767,7 +844,6 @@ function renderDebug(img, faces, selectedIdx, leftEyePoints, rightEyePoints, lef
     ctx.fillStyle = '#00ccff'; ctx.font = '11px monospace';
     ctx.fillText('L_EYE', leftBbox.x, leftBbox.y - 3);
   }
-  // Draw right eye patch box
   if (rightBbox) {
     ctx.strokeStyle = '#ff00cc'; ctx.lineWidth = 2; ctx.setLineDash([6, 3]);
     ctx.strokeRect(rightBbox.x, rightBbox.y, rightBbox.width, rightBbox.height);
@@ -776,12 +852,40 @@ function renderDebug(img, faces, selectedIdx, leftEyePoints, rightEyePoints, lef
     ctx.fillText('R_EYE', rightBbox.x, rightBbox.y - 3);
   }
 
-  // Label
+  // Layer 6: Role label + legend
   ctx.fillStyle = 'rgba(0,0,0,0.7)';
   ctx.fillRect(0, 0, label.length * 10 + 16, 24);
   ctx.fillStyle = '#ffffff';
   ctx.font = 'bold 14px monospace';
   ctx.fillText(label, 8, 17);
+
+  // Pose summary in bottom-left corner
+  if (poseSummary && poseSummary.available) {
+    const poseText = 'yaw=' + poseSummary.yawDeg + ' pitch=' + poseSummary.pitchDeg + ' roll=' + poseSummary.rollDeg;
+    const pw = poseText.length * 7.5 + 16;
+    ctx.fillStyle = 'rgba(0,0,0,0.7)';
+    ctx.fillRect(0, img.naturalHeight - 24, pw, 24);
+    ctx.fillStyle = '#ffcc33';
+    ctx.font = '12px monospace';
+    ctx.fillText(poseText, 8, img.naturalHeight - 7);
+  }
+
+  // Mesh legend in top-right
+  const legendLines = [
+    { color: 'rgba(255,200,50,0.6)', text: 'full mesh (' + (fullMeshPoints ? fullMeshPoints.length : 0) + ' pts)' },
+    { color: '#00ccff', text: 'L eye' },
+    { color: '#ff00cc', text: 'R eye' }
+  ];
+  const lx = img.naturalWidth - 130;
+  for (let li = 0; li < legendLines.length; li++) {
+    const ly = 6 + li * 16;
+    ctx.fillStyle = 'rgba(0,0,0,0.5)';
+    ctx.fillRect(lx - 4, ly, 134, 15);
+    ctx.fillStyle = legendLines[li].color;
+    ctx.font = '11px monospace';
+    ctx.fillText(legendLines[li].text, lx + 12, ly + 12);
+    ctx.beginPath(); ctx.arc(lx + 4, ly + 7, 3, 0, 2 * Math.PI); ctx.fill();
+  }
 
   container.appendChild(canvas);
 }
@@ -812,11 +916,16 @@ window.detectEyeGeometry = async function(baseUrl, refUrl, baseFaceHint, refFace
   const refW = refImg.naturalWidth, refH = refImg.naturalHeight;
 
   // Detect faces in both images
+  // FaceLandmarker returns: faceLandmarks, facialTransformationMatrixes (sic — MediaPipe typo)
   const baseResult = faceLandmarker.detect(baseImg);
   const refResult = faceLandmarker.detect(refImg);
 
   const baseFaces = baseResult.faceLandmarks || [];
   const refFaces = refResult.faceLandmarks || [];
+
+  // Capture facial transformation matrices (face pose) if available
+  const baseMatrices = baseResult.facialTransformationMatrixes || [];
+  const refMatrices = refResult.facialTransformationMatrixes || [];
 
   if (baseFaces.length === 0) {
     return { success: false, error: 'No face detected in base image', detections: { baseFaces: 0, referenceFaces: refFaces.length } };
@@ -974,9 +1083,19 @@ window.detectEyeGeometry = async function(baseUrl, refUrl, baseFaceHint, refFace
   const leftBlend = eyeBlendPolicy(leftTransform, confidence, refLeftPath);
   const rightBlend = eyeBlendPolicy(rightTransform, confidence, refRightPath);
 
-  // ---- Debug rendering ----
-  renderDebug(baseImg, baseFaces, baseFaceIdx, baseLeftRaw, baseRightRaw, baseLeftBbox, baseRightBbox, 'BASE (target)');
-  renderDebug(refImg, refFaces, refFaceIdx, refLeftRaw, refRightRaw, refLeftBbox, refRightBbox, 'REFERENCE (source)');
+  // ---- Extract full face mesh + pose for selected faces (debug/preview) ----
+  const baseFaceMesh = extractFullFaceMesh(baseFaceLm, baseW, baseH);
+  const refFaceMesh = extractFullFaceMesh(refFaceLm, refW, refH);
+  const basePose = extractPoseSummary(baseMatrices[baseFaceIdx]);
+  const refPose = extractPoseSummary(refMatrices[refFaceIdx]);
+
+  console.log('[geometry] mesh: basePts=' + baseFaceMesh.length + ' refPts=' + refFaceMesh.length
+    + ' basePose=' + (basePose.available ? 'y=' + basePose.yawDeg + ' p=' + basePose.pitchDeg + ' r=' + basePose.rollDeg : 'n/a')
+    + ' refPose=' + (refPose.available ? 'y=' + refPose.yawDeg + ' p=' + refPose.pitchDeg + ' r=' + refPose.rollDeg : 'n/a'));
+
+  // ---- Debug rendering (now includes full face mesh + pose) ----
+  renderDebug(baseImg, baseFaces, baseFaceIdx, baseLeftRaw, baseRightRaw, baseLeftBbox, baseRightBbox, 'BASE (target)', baseFaceMesh, basePose);
+  renderDebug(refImg, refFaces, refFaceIdx, refLeftRaw, refRightRaw, refLeftBbox, refRightBbox, 'REFERENCE (source)', refFaceMesh, refPose);
 
   // ---- Build face bbox preview data ----
   const allBaseFaceBboxes = baseFaces.map(f => faceArea(f, baseW, baseH));
@@ -1032,7 +1151,17 @@ window.detectEyeGeometry = async function(baseUrl, refUrl, baseFaceHint, refFace
       refLeftEyeLandmarks: refLeftRaw,
       refRightEyeLandmarks: refRightRaw,
       selectedBaseFaceIdx: baseFaceIdx,
-      selectedRefFaceIdx: refFaceIdx
+      selectedRefFaceIdx: refFaceIdx,
+      // Full face mesh for selected faces — gives face-relative context
+      // for diagnosing whether eye placement makes sense within the whole face
+      baseFaceMesh: baseFaceMesh,
+      refFaceMesh: refFaceMesh,
+      // Face pose estimates from transformation matrices
+      // Helps determine if base/ref face orientations differ meaningfully
+      basePose: basePose,
+      refPose: refPose,
+      baseLandmarkCount: baseFaceLm.length,
+      refLandmarkCount: refFaceLm.length
     }
   };
 };

@@ -406,7 +406,7 @@ app.post('/api/preview-regions', async (req, res) => {
       fetchImageBuffer(referenceImageUrl)
     ]);
 
-    // Build preview data for each role — per-eye layout
+    // Build preview data for each role — per-eye layout + full face mesh + pose
     const gd = geometryData || {};
     const baseGeoData = {
       allFaces: gd.allBaseFaces || [],
@@ -416,7 +416,9 @@ app.post('/api/preview-regions', async (req, res) => {
       leftEyeBox: gd.leftEyeTargetBox || null,
       rightEyeBox: gd.rightEyeTargetBox || null,
       leftTransform: gd.leftTransform || null,
-      rightTransform: gd.rightTransform || null
+      rightTransform: gd.rightTransform || null,
+      faceMesh: gd.baseFaceMesh || null,
+      pose: gd.basePose || null
     };
     const refGeoData = {
       allFaces: gd.allRefFaces || [],
@@ -426,7 +428,9 @@ app.post('/api/preview-regions', async (req, res) => {
       leftEyeBox: gd.leftEyeSourceBox || null,
       rightEyeBox: gd.rightEyeSourceBox || null,
       leftTransform: null,
-      rightTransform: null
+      rightTransform: null,
+      faceMesh: gd.refFaceMesh || null,
+      pose: gd.refPose || null
     };
 
     // Render annotated previews
