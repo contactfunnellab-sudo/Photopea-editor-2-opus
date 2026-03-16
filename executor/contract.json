@@ -79,7 +79,16 @@
                 "rotation": { "type": "number", "default": 0, "description": "Rotation in radians. Initial guess from eye corner vector, refined by coordinate descent minimizing multi-anchor error." },
                 "scale": { "type": "number", "default": 1.0, "description": "Uniform scale. Initial guess from corner distance, refined to minimize multi-anchor error. Used for BOTH axes to preserve donor eye openness." },
                 "scaleX": { "type": "number", "default": 1.0, "description": "Same as scale (uniform). NOT derived from lid height — that would squash donor to match closed base eye." },
-                "scaleY": { "type": "number", "default": 1.0, "description": "Same as scale (uniform). Reserved for future non-blink cosmetic modes." }
+                "scaleY": { "type": "number", "default": 1.0, "description": "Same as scale (uniform). Reserved for future non-blink cosmetic modes." },
+                "_refinement": {
+                  "type": "object",
+                  "description": "Diagnostic refinement info (not consumed by executor). Contains initError, finalError, improvement, finalAnchors, blinkMode, slitAware, weightProfile.",
+                  "properties": {
+                    "blinkMode": { "type": "boolean", "description": "True if blink/squint weight profile was used" },
+                    "slitAware": { "type": "boolean", "description": "True if slit-line anchors (slitLeft/slitRight/slitCenter) were added to the objective" },
+                    "weightProfile": { "type": "string", "enum": ["general", "blink_squint"], "description": "Which anchor weight set was used for refinement" }
+                  }
+                }
               }
             },
             "fitMode": {
@@ -241,7 +250,7 @@
       "   d. Copy and paste as new layer",
       "   e. Name layer 'Feature: {label}'",
       "   f. Apply opacity from blend.opacity",
-      "   g. Apply uniform scale from placementTransform.scale (default, preserves donor openness for blink repair) OR non-uniform bbox resize if fitMode='non_uniform_bbox'",
+      "   g. Apply uniform scale from placementTransform.scale (default, preserves donor openness for blink repair). Scale/rotation/translation solved via multi-anchor refinement with blink-aware weight selection: slit-line anchors prioritized when base eye is squinting, generic anchors used for open-eye transfer. OR non-uniform bbox resize if fitMode='non_uniform_bbox'",
       "   h. Apply rotation and translation from placementTransform",
       "   i. If maskMode='target_polygon': select target polygon, feather, invert, cut (opt-in only)",
       "   j. Deselect",
