@@ -900,10 +900,40 @@ window.detectEyeGeometry = async function(baseUrl, refUrl, baseFaceHint, refFace
   //   (scale/rotation around patch bbox center + translate) so the executor
   //   can apply it directly via Photopea. The eye anchors guided the solve,
   //   but the patch carries the result.
+
+  // ---- STEP 5: Eye aspect ratio / blink heuristic ----
+  // MUST be computed before blinkInfo and slit targets.
+  const baseEAR = eyeAspectRatio(baseLeftRaw, baseRightRaw);
+  const refEAR = eyeAspectRatio(refLeftRaw, refRightRaw);
+  const baseMoreClosed = baseEAR < refEAR;
+
+  // ---- STEP 6: Per-eye EAR for slit target derivation ----
+  function singleEyeEAR(pts) {
+    const bb = boundingBox(pts);
+    if (bb.width < 1) return 0;
+    return bb.height / bb.width;
+  }
+  const baseLeftEAR = singleEyeEAR(baseLeftRaw);
+  const baseRightEAR = singleEyeEAR(baseRightRaw);
+  const refLeftEAR = singleEyeEAR(refLeftRaw);
+  const refRightEAR = singleEyeEAR(refRightRaw);
+
+  // ---- STEP 7: Squint-line / slit targets for blink repair ----
+  // Derive the visible slit geometry from base eye landmarks.
+  // Also derive source (donor) slit for anchor correspondence.
+  const baseLeftSlit = deriveSquintLineTarget(baseLeftAnchors, baseLeftEAR);
+  const baseRightSlit = deriveSquintLineTarget(baseRightAnchors, baseRightEAR);
+  const refLeftSlit = deriveSquintLineTarget(refLeftAnchors, refLeftEAR);
+  const refRightSlit = deriveSquintLineTarget(refRightAnchors, refRightEAR);
+
+  // ---- STEP 8: Build blinkInfo (depends on steps 5-7) ----
   // blinkInfo carries per-eye slit targets and overall blink state.
   // The slit target defines the visible squint line in the base image.
   // The solver uses slit endpoints/center as first-class placement
   // targets when the base eye is more closed than the reference.
+  if (typeof baseMoreClosed !== 'boolean' || !baseLeftSlit || !baseRightSlit || !refLeftSlit || !refRightSlit) {
+    throw new Error('Blink/slit targets not initialized before transform solve — check execution order');
+  }
   const leftBlinkInfo = {
     baseMoreClosed: baseMoreClosed,
     tgtSlitTarget: baseLeftSlit,
@@ -915,6 +945,11 @@ window.detectEyeGeometry = async function(baseUrl, refUrl, baseFaceHint, refFace
     srcSlitTarget: refRightSlit
   };
 
+  console.log('[geometry] blink: baseEAR=' + baseEAR.toFixed(3) + ' refEAR=' + refEAR.toFixed(3)
+    + ' baseMoreClosed=' + baseMoreClosed
+    + ' slitL=' + baseLeftSlit.isSquinting + ' slitR=' + baseRightSlit.isSquinting);
+
+  // ---- STEP 9: Solve transforms (depends on step 8) ----
   const leftTransform = solveEyeFrameTransform(
     refLeftAnchors, baseLeftAnchors, refLeftBbox, faceStabilizer, leftBlinkInfo
   );
@@ -922,7 +957,11 @@ window.detectEyeGeometry = async function(baseUrl, refUrl, baseFaceHint, refFace
     refRightAnchors, baseRightAnchors, refRightBbox, faceStabilizer, rightBlinkInfo
   );
 
-  // ---- Confidence ----
+  console.log('[geometry] transforms solved: L_err=' + leftTransform._refinement.finalError
+    + ' R_err=' + rightTransform._refinement.finalError
+    + ' profile=' + leftTransform._refinement.weightProfile);
+
+  // ---- STEP 10: Confidence, blend, response ----
   let confidence = 1.0;
   const avgScale = (leftTransform.scale + rightTransform.scale) / 2;
   const avgRot = (Math.abs(leftTransform.rotation) + Math.abs(rightTransform.rotation)) / 2;
@@ -934,30 +973,6 @@ window.detectEyeGeometry = async function(baseUrl, refUrl, baseFaceHint, refFace
   // ---- Blend policy per eye ----
   const leftBlend = eyeBlendPolicy(leftTransform, confidence, refLeftPath);
   const rightBlend = eyeBlendPolicy(rightTransform, confidence, refRightPath);
-
-  // ---- Eye aspect ratio for blink detection ----
-  const baseEAR = eyeAspectRatio(baseLeftRaw, baseRightRaw);
-  const refEAR = eyeAspectRatio(refLeftRaw, refRightRaw);
-  const baseMoreClosed = baseEAR < refEAR;
-
-  // ---- Per-eye EAR for slit target derivation ----
-  function singleEyeEAR(pts) {
-    const bb = boundingBox(pts);
-    if (bb.width < 1) return 0;
-    return bb.height / bb.width;
-  }
-  const baseLeftEAR = singleEyeEAR(baseLeftRaw);
-  const baseRightEAR = singleEyeEAR(baseRightRaw);
-  const refLeftEAR = singleEyeEAR(refLeftRaw);
-  const refRightEAR = singleEyeEAR(refRightRaw);
-
-  // ---- Squint-line / slit targets for blink repair ----
-  // Derive the visible slit geometry from base eye landmarks.
-  // Also derive source (donor) slit for anchor correspondence.
-  const baseLeftSlit = deriveSquintLineTarget(baseLeftAnchors, baseLeftEAR);
-  const baseRightSlit = deriveSquintLineTarget(baseRightAnchors, baseRightEAR);
-  const refLeftSlit = deriveSquintLineTarget(refLeftAnchors, refLeftEAR);
-  const refRightSlit = deriveSquintLineTarget(refRightAnchors, refRightEAR);
 
   // ---- Debug rendering ----
   renderDebug(baseImg, baseFaces, baseFaceIdx, baseLeftRaw, baseRightRaw, baseLeftBbox, baseRightBbox, 'BASE (target)');
