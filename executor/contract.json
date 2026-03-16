@@ -74,12 +74,12 @@
             "placementTransform": {
               "type": "object",
               "properties": {
-                "translateX": { "type": "number", "default": 0, "description": "Horizontal translation solved so corner midpoints land on target corners, with nose bridge vertical stabilization" },
-                "translateY": { "type": "number", "default": 0, "description": "Vertical translation (corner-locked + face-structure stabilizer)" },
-                "rotation": { "type": "number", "default": 0, "description": "Rotation in radians from eye corner-to-corner vector" },
-                "scale": { "type": "number", "default": 1.0, "description": "Uniform scale from eye corner distance ratio. Used for BOTH axes in blink repair to preserve donor eye openness." },
-                "scaleX": { "type": "number", "default": 1.0, "description": "Same as scale for blink repair (uniform). Reserved for future non-blink cosmetic modes." },
-                "scaleY": { "type": "number", "default": 1.0, "description": "Same as scale for blink repair (uniform). NOT derived from lid height — that would squash donor to match closed base eye. Reserved for future non-blink cosmetic modes." }
+                "translateX": { "type": "number", "default": 0, "description": "Horizontal translation from two-frame solver. Eye-frame anchors (corners, iris, nose bridge) solved first, then expressed as patch-frame transform around Photopea MIDDLECENTER pivot." },
+                "translateY": { "type": "number", "default": 0, "description": "Vertical translation from two-frame solver with multi-anchor refinement." },
+                "rotation": { "type": "number", "default": 0, "description": "Rotation in radians. Initial guess from eye corner vector, refined by coordinate descent minimizing multi-anchor error." },
+                "scale": { "type": "number", "default": 1.0, "description": "Uniform scale. Initial guess from corner distance, refined to minimize multi-anchor error. Used for BOTH axes to preserve donor eye openness." },
+                "scaleX": { "type": "number", "default": 1.0, "description": "Same as scale (uniform). NOT derived from lid height — that would squash donor to match closed base eye." },
+                "scaleY": { "type": "number", "default": 1.0, "description": "Same as scale (uniform). Reserved for future non-blink cosmetic modes." }
               }
             },
             "fitMode": {
