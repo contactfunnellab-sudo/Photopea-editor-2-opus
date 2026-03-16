@@ -74,19 +74,19 @@
             "placementTransform": {
               "type": "object",
               "properties": {
-                "translateX": { "type": "number", "default": 0, "description": "Horizontal translation (bbox center delta, matches Photopea MIDDLECENTER pivot)" },
-                "translateY": { "type": "number", "default": 0, "description": "Vertical translation (bbox center delta)" },
-                "rotation": { "type": "number", "default": 0, "description": "Rotation in radians (from eye corner anchor pairs)" },
-                "scale": { "type": "number", "default": 1.0, "description": "Uniform scale factor (backward compat, average of scaleX/scaleY)" },
-                "scaleX": { "type": "number", "default": 1.0, "description": "Horizontal scale from landmark corner distance ratio. Geometry-derived, not bbox." },
-                "scaleY": { "type": "number", "default": 1.0, "description": "Vertical scale from landmark upper/lower lid distance ratio (eye opening fit). Geometry-derived, not bbox." }
+                "translateX": { "type": "number", "default": 0, "description": "Horizontal translation solved so corner midpoints land on target corners, with nose bridge vertical stabilization" },
+                "translateY": { "type": "number", "default": 0, "description": "Vertical translation (corner-locked + face-structure stabilizer)" },
+                "rotation": { "type": "number", "default": 0, "description": "Rotation in radians from eye corner-to-corner vector" },
+                "scale": { "type": "number", "default": 1.0, "description": "Uniform scale from eye corner distance ratio. Used for BOTH axes in blink repair to preserve donor eye openness." },
+                "scaleX": { "type": "number", "default": 1.0, "description": "Same as scale for blink repair (uniform). Reserved for future non-blink cosmetic modes." },
+                "scaleY": { "type": "number", "default": 1.0, "description": "Same as scale for blink repair (uniform). NOT derived from lid height — that would squash donor to match closed base eye. Reserved for future non-blink cosmetic modes." }
               }
             },
             "fitMode": {
               "type": "string",
               "enum": ["similarity", "non_uniform_bbox"],
               "default": "similarity",
-              "description": "Scale mode. 'similarity' (default) uses placementTransform.scale uniformly. 'non_uniform_bbox' (experimental) derives scaleX/scaleY from source vs target bounding boxes."
+              "description": "Scale mode. 'similarity' (default) uses placementTransform.scale uniformly for BOTH axes — preserves donor eye openness for blink repair. 'non_uniform_bbox' (experimental) derives scaleX/scaleY from source vs target bounding boxes."
             },
             "maskMode": {
               "type": "string",
@@ -241,7 +241,7 @@
       "   d. Copy and paste as new layer",
       "   e. Name layer 'Feature: {label}'",
       "   f. Apply opacity from blend.opacity",
-      "   g. Apply uniform scale from placementTransform.scale (default) OR non-uniform bbox resize if fitMode='non_uniform_bbox'",
+      "   g. Apply uniform scale from placementTransform.scale (default, preserves donor openness for blink repair) OR non-uniform bbox resize if fitMode='non_uniform_bbox'",
       "   h. Apply rotation and translation from placementTransform",
       "   i. If maskMode='target_polygon': select target polygon, feather, invert, cut (opt-in only)",
       "   j. Deselect",
