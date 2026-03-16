@@ -330,9 +330,12 @@ window.runFeatureTransfer = function(payload) {
           + ' scaleY=' + (Math.round((tBB.height / sBB.height) * 1000) / 1000)
           + ' maskFeather=' + mf);
       } else {
+        var refInfo = (sp.placementTransform && sp.placementTransform._refinement)
+          ? ' refined=' + sp.placementTransform._refinement.initError + '->' + sp.placementTransform._refinement.finalError
+          : '';
         logs.push('prim[' + i + '] ' + (sp.label || '?') + ': fit=' + fm + ' mask=' + mm
           + ' scale=' + ((sp.placementTransform && sp.placementTransform.scale) || 'n/a')
-          + ' (uniform, donor openness preserved)');
+          + ' (uniform, eye-frame solved)' + refInfo);
       }
     }
     logs.push('Executing path-based transfer (' + count + ' primitive' + (count > 1 ? 's' : '') + ')...');

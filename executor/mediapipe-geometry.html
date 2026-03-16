@@ -170,25 +170,29 @@ function roundPoints(points) {
   return points.map(([x, y]) => [Math.round(x * 10) / 10, Math.round(y * 10) / 10]);
 }
 
-// Eyelid-aware asymmetric expand for a single eye.
-// Margins are sized to capture surrounding skin for a smooth blend zone
-// while staying local to the eye region (not a large face patch).
-// - top: captures upper eyelid fold + brow transition
-// - bottom: captures lower lid + under-eye skin + lower lash line
-// - horizontal: captures inner/outer eye corners with blend room
+// Carrier patch expansion for a single eye.
 //
-// Lower-lid preservation strategy:
-//   Bottom margin is biased higher (65% of eye height) than the previous 55%
-//   to capture lower lash texture, which is critical for natural appearance.
+// THE PATCH IS A CARRIER, NOT THE PLACEMENT TARGET.
+// The patch exists to transport donor eye texture plus enough surrounding skin
+// for natural blending. The anatomical eye placement is solved separately
+// by solveEyeFrameTransform() using multi-anchor error minimization.
+// The patch follows the solved eye — it does not define where the eye goes.
+//
+// Margins:
+//   - top (85% of eye height): upper eyelid fold + brow transition
+//   - bottom (65% of eye height): lower lid + under-eye skin + lower lash line
+//   - horizontal (18% of eye width): inner/outer corner skin + blend room
+//
+// Lower-lid preservation:
+//   Bottom margin is biased higher than top to capture lower lash texture.
 //   Chaikin smoothing stays at 1 iteration (reduced from original 2) to
-//   preserve the angular detail of lower-lid contour points. This prevents
-//   the patch from rounding off the lower lash line into a generic curve.
+//   preserve angular detail of lower-lid contour — prevents rounding off
+//   the lower lash line into a generic curve.
 //
-// WHY lower-lid capture matters:
-//   Lower-lid / lash texture is part of what makes the donor eye look real.
-//   If the patch cuts too tight at the bottom, the eye looks pasted-on because
-//   the lower lash detail is lost. The winning manual edits always included
-//   generous lower-lid coverage.
+// Horizontal margin:
+//   Increased from 15% to 18% for better corner skin coverage. The corners
+//   are the primary alignment targets, so having enough blend room around
+//   them is important for a natural transition.
 function processEyePoints(rawPoints) {
   const bb = boundingBox(rawPoints);
   const eyeW = bb.width;
@@ -196,7 +200,7 @@ function processEyePoints(rawPoints) {
 
   const topMargin = Math.max(4, Math.round(eyeH * 0.85));
   const bottomMargin = Math.max(4, Math.round(eyeH * 0.65));
-  const hMargin = Math.max(3, Math.round(eyeW * 0.15));
+  const hMargin = Math.max(4, Math.round(eyeW * 0.18));
 
   let pts = expandPointsAsymmetric(rawPoints, topMargin, bottomMargin, hMargin, hMargin);
   pts = chaikinSmooth(pts, 1);
@@ -267,34 +271,128 @@ function selectFace(faces, hint, imgW, imgH) {
 
 // ---- Per-Eye Transform Computation ----
 
-// Corner-locked eye transform for blink repair.
+// =====================================================================
+// TWO-FRAME ARCHITECTURE: Eye Frame vs Patch Frame
+// =====================================================================
 //
-// Design principles:
-//   1. Eye corners determine horizontal alignment, scale, and rotation.
-//      Corners are anatomically stable whether the eye is open or closed.
-//   2. Scale is UNIFORM (same horizontally and vertically) derived from
-//      corner-to-corner distance ratio. This preserves the donor eye's
-//      natural openness instead of squashing it to match a closed base eye.
-//   3. Translation is SOLVED so that after scale + rotation (around the
-//      Photopea MIDDLECENTER pivot = bbox center), the midpoint of the
-//      transformed source corners lands on the midpoint of the target corners.
-//      This is the corner-locked placement — not just bbox-center matching.
-//   4. A face-structure stabilizer (nose bridge) applies a small vertical
-//      correction so the eye sits at the right height relative to the nose,
-//      preventing drift along the face's vertical axis.
+// WHY THE OLD ARCHITECTURE KEPT PRODUCING "CLOSE BUT WRONG" RESULTS:
+//   The old code solved placement from eye-internal anchors (corner midpoint)
+//   but applied that transform to a larger carrier patch. The carrier patch
+//   is the expanded polygon used for copy/paste in Photopea — it includes
+//   blend margins, upper brow, lower lash area, etc. The eye sits INSIDE
+//   this carrier patch, offset from the patch's geometric center.
 //
-// WHY uniform scale instead of scaleX/scaleY:
-//   In blink repair, the base eye is often closed. The base upper↔lower lid
-//   distance is corrupted by the blink — it describes the problem, not the
-//   target. Using it as scaleY would squash the donor eye to match the closed
-//   aperture, literally reproducing the blink instead of fixing it.
-//   Uniform corner-based scale preserves the donor's natural eye opening.
+//   When Photopea applies resize/rotate around the patch bbox center
+//   (AnchorPosition.MIDDLECENTER), the eye inside the patch moves differently
+//   than the solver predicted, because the solver was reasoning about eye
+//   anchors but the pivot is the patch center. A single midpoint constraint
+//   can be "right" while individual corners, iris, and lid points are wrong.
 //
-// The lid-height ratio is computed and stored as diagnostics (lidScaleY)
-// but is NOT applied. It can be used by a future opt-in mode for cosmetic
-// (non-blink) transfers where matching aperture is actually desirable.
-function computeCornerLockedEyeTransform(srcPathPoints, tgtPathPoints, srcAnchors, tgtAnchors, faceStabilizer) {
-  // --- Rotation from corner-to-corner vector ---
+// THE NEW DESIGN:
+//   1. ANATOMICAL EYE FRAME — where the actual eye must land.
+//      Defined by stable anchors: inner corner, outer corner, iris center,
+//      upper/lower lid apex, nose bridge (face-structure anchor).
+//      This is what we SOLVE for.
+//
+//   2. CARRIER PATCH FRAME — the larger polygon copied from the donor.
+//      Exists for blending, lash texture, and surrounding skin transport.
+//      Has its own bbox center which Photopea uses as transform pivot.
+//      This is what we APPLY the transform to.
+//
+//   The patch placement is DERIVED from the solved eye frame — the patch
+//   does not define where the eye belongs. The solver optimizes anchor
+//   landing across multiple points, then reverse-engineers the Photopea
+//   transform (scale, rotation, translate around patch bbox center) that
+//   achieves that landing.
+// =====================================================================
+
+// Simulate Photopea's transform chain on a single point.
+// Photopea applies: 1) resize around pivot, 2) rotate around pivot, 3) translate.
+// This is the forward model — given transform params, where does a point end up?
+function applyTransformToPoint(px, py, pivotX, pivotY, scale, rotation, tx, ty) {
+  // Scale around pivot
+  const sx = pivotX + (px - pivotX) * scale;
+  const sy = pivotY + (py - pivotY) * scale;
+  // Rotate around pivot
+  const cos = Math.cos(rotation);
+  const sin = Math.sin(rotation);
+  const dx = sx - pivotX;
+  const dy = sy - pivotY;
+  const rx = pivotX + dx * cos - dy * sin;
+  const ry = pivotY + dx * sin + dy * cos;
+  // Translate
+  return [rx + tx, ry + ty];
+}
+
+// Compute weighted multi-anchor error for a candidate transform.
+// Returns { totalError, perAnchor: { name: distance, ... } }
+// This evaluates: if we apply (scale, rotation, tx, ty) around the patch pivot,
+// how far does each transformed source anchor land from its target position?
+function computeMultiAnchorError(srcAnchors, tgtAnchors, pivotX, pivotY, scale, rotation, tx, ty, weights) {
+  let totalError = 0;
+  const perAnchor = {};
+  for (const name in weights) {
+    if (!srcAnchors[name] || !tgtAnchors[name]) continue;
+    const [rx, ry] = applyTransformToPoint(
+      srcAnchors[name][0], srcAnchors[name][1],
+      pivotX, pivotY, scale, rotation, tx, ty
+    );
+    const dist = Math.sqrt(
+      Math.pow(rx - tgtAnchors[name][0], 2) +
+      Math.pow(ry - tgtAnchors[name][1], 2)
+    );
+    perAnchor[name] = Math.round(dist * 100) / 100;
+    totalError += dist * weights[name];
+  }
+  return { totalError: Math.round(totalError * 100) / 100, perAnchor };
+}
+
+// =====================================================================
+// STAGE 1: Solve the anatomical eye transform
+// =====================================================================
+// Uses eye corners for initial closed-form guess (scale + rotation),
+// then runs a deterministic coordinate-descent refinement to minimize
+// weighted multi-anchor error.
+//
+// WHY REFINEMENT:
+//   A single closed-form transform (corner midpoint + nose correction) is
+//   not enough when the thing being aligned is the eye INSIDE a larger patch.
+//   The patch pivot (bbox center) is offset from the eye center, so a transform
+//   that perfectly lands the corner midpoint doesn't guarantee individual
+//   corners, iris, or lid points land correctly. The refinement searches
+//   locally around the initial guess and finds the transform that minimizes
+//   total weighted anchor error — still fully deterministic and debuggable.
+//
+// ANCHOR WEIGHTS for blink repair:
+//   Corners = highest (1.0) — must land exactly for alignment
+//   Iris center = high (0.7) — gaze direction must feel correct
+//   Lower lid = medium (0.4) — lash line must track face structure
+//   Nose bridge = medium (0.3) — locks eye to face, prevents drift
+//   Upper lid = low (0.1) — corrupted by blink in base, unreliable target
+// =====================================================================
+function solveEyeFrameTransform(srcAnchors, tgtAnchors, srcPatchBB, faceStabilizer) {
+  const pivotX = srcPatchBB.x + srcPatchBB.width / 2;
+  const pivotY = srcPatchBB.y + srcPatchBB.height / 2;
+
+  // Anchor weights — explicit so the objective is clear and tunable
+  const weights = {
+    anchor1: 1.0,       // outer/inner corner — highest priority
+    anchor2: 1.0,       // other corner — highest priority
+    irisCenter: 0.7,    // gaze alignment
+    lowerLid: 0.4,      // lower-lash / face structure
+    upperLid: 0.1       // low — corrupted by blink in base
+  };
+
+  // Add face-structure anchor (nose bridge) to both anchor sets for error computation
+  const srcAnchorsExt = { ...srcAnchors };
+  const tgtAnchorsExt = { ...tgtAnchors };
+  if (faceStabilizer && faceStabilizer.srcNoseBridge && faceStabilizer.tgtNoseBridge) {
+    srcAnchorsExt.noseBridge = faceStabilizer.srcNoseBridge;
+    tgtAnchorsExt.noseBridge = faceStabilizer.tgtNoseBridge;
+    weights.noseBridge = 0.3;
+  }
+
+  // ---- Initial guess from corners (closed-form) ----
   const sdx = srcAnchors.anchor2[0] - srcAnchors.anchor1[0];
   const sdy = srcAnchors.anchor2[1] - srcAnchors.anchor1[1];
   const sDist = Math.sqrt(sdx * sdx + sdy * sdy);
@@ -305,15 +403,27 @@ function computeCornerLockedEyeTransform(srcPathPoints, tgtPathPoints, srcAnchor
   const tDist = Math.sqrt(tdx * tdx + tdy * tdy);
   const tAngle = Math.atan2(tdy, tdx);
 
-  const rotation = (sDist > 0.001 && tDist > 0.001) ? tAngle - sAngle : 0;
+  let scale = sDist > 0.001 ? tDist / sDist : 1.0;
+  let rotation = (sDist > 0.001 && tDist > 0.001) ? tAngle - sAngle : 0;
 
-  // --- Uniform scale from corner distance ---
-  // Corner distance is stable whether the eye is open or closed.
-  // Using this for BOTH horizontal and vertical preserves donor openness.
-  const scale = sDist > 0.001 ? tDist / sDist : 1.0;
+  // Solve initial translation so corner midpoint lands on target midpoint
+  const srcMidX = (srcAnchors.anchor1[0] + srcAnchors.anchor2[0]) / 2;
+  const srcMidY = (srcAnchors.anchor1[1] + srcAnchors.anchor2[1]) / 2;
+  const tgtMidX = (tgtAnchors.anchor1[0] + tgtAnchors.anchor2[0]) / 2;
+  const tgtMidY = (tgtAnchors.anchor1[1] + tgtAnchors.anchor2[1]) / 2;
 
-  // --- Lid-height ratio (diagnostic only, NOT applied for blink repair) ---
-  // Stored so future opt-in modes can use it for non-blink cosmetic transfers.
+  const [initLandX, initLandY] = applyTransformToPoint(
+    srcMidX, srcMidY, pivotX, pivotY, scale, rotation, 0, 0
+  );
+  let tx = tgtMidX - initLandX;
+  let ty = tgtMidY - initLandY;
+
+  // ---- Compute initial error (before refinement) ----
+  const initError = computeMultiAnchorError(
+    srcAnchorsExt, tgtAnchorsExt, pivotX, pivotY, scale, rotation, tx, ty, weights
+  );
+
+  // ---- Lid-height ratio (diagnostic only, NOT applied for blink repair) ----
   const srcVDist = Math.sqrt(
     Math.pow(srcAnchors.upperLid[0] - srcAnchors.lowerLid[0], 2) +
     Math.pow(srcAnchors.upperLid[1] - srcAnchors.lowerLid[1], 2)
@@ -324,80 +434,75 @@ function computeCornerLockedEyeTransform(srcPathPoints, tgtPathPoints, srcAnchor
   );
   const lidScaleY = srcVDist > 0.001 ? tgtVDist / srcVDist : scale;
 
-  // --- Corner-locked translation ---
-  // Goal: after Photopea applies scale + rotation around bbox center (MIDDLECENTER),
-  // the midpoint of the transformed source corners should land on the midpoint
-  // of the target corners.
-  //
-  // Photopea operations:
-  //   1. resize(scalePct, scalePct, MIDDLECENTER) — scales around bbox center
-  //   2. rotate(deg, MIDDLECENTER) — rotates around bbox center
-  //   3. translate(tx, ty) — pixel shift
-  //
-  // So we compute where the source corner midpoint ends up after scale+rotate
-  // around the bbox center, then solve for the translation that lands it on
-  // the target corner midpoint.
+  // ---- STAGE 2: Deterministic coordinate-descent refinement ----
+  // Searches locally around the initial guess to minimize multi-anchor error.
+  // Parameters: tx, ty, rotation, scale (4D).
+  // Steps are small and bounded — fast and deterministic.
+  const MAX_ROUNDS = 12;
+  const txStep = 0.5;     // ±0.5 px translation steps
+  const tyStep = 0.5;
+  const rotStep = 0.001;  // ±0.057 degrees rotation steps
+  const scaleStep = 0.003; // ±0.3% scale steps
 
-  const srcBB = boundingBox(srcPathPoints);
-  const pivotX = srcBB.x + srcBB.width / 2;
-  const pivotY = srcBB.y + srcBB.height / 2;
+  let bestError = initError.totalError;
+  let improved = true;
 
-  // Source corner midpoint (before transform)
-  const srcMidX = (srcAnchors.anchor1[0] + srcAnchors.anchor2[0]) / 2;
-  const srcMidY = (srcAnchors.anchor1[1] + srcAnchors.anchor2[1]) / 2;
+  for (let round = 0; round < MAX_ROUNDS && improved; round++) {
+    improved = false;
 
-  // Target corner midpoint (where we want to land)
-  const tgtMidX = (tgtAnchors.anchor1[0] + tgtAnchors.anchor2[0]) / 2;
-  const tgtMidY = (tgtAnchors.anchor1[1] + tgtAnchors.anchor2[1]) / 2;
+    // Try each parameter direction
+    const candidates = [
+      { param: 'tx', delta: txStep },
+      { param: 'tx', delta: -txStep },
+      { param: 'ty', delta: tyStep },
+      { param: 'ty', delta: -tyStep },
+      { param: 'rot', delta: rotStep },
+      { param: 'rot', delta: -rotStep },
+      { param: 'scale', delta: scaleStep },
+      { param: 'scale', delta: -scaleStep }
+    ];
 
-  // Apply scale around pivot
-  const afterScaleX = pivotX + (srcMidX - pivotX) * scale;
-  const afterScaleY = pivotY + (srcMidY - pivotY) * scale;
+    for (const cand of candidates) {
+      let candTx = tx, candTy = ty, candRot = rotation, candScale = scale;
+      if (cand.param === 'tx') candTx += cand.delta;
+      else if (cand.param === 'ty') candTy += cand.delta;
+      else if (cand.param === 'rot') candRot += cand.delta;
+      else if (cand.param === 'scale') candScale += cand.delta;
 
-  // Apply rotation around pivot (pivot stays at same position after scale)
-  const cos = Math.cos(rotation);
-  const sin = Math.sin(rotation);
-  const dxFromPivot = afterScaleX - pivotX;
-  const dyFromPivot = afterScaleY - pivotY;
-  const afterRotX = pivotX + dxFromPivot * cos - dyFromPivot * sin;
-  const afterRotY = pivotY + dxFromPivot * sin + dyFromPivot * cos;
+      const err = computeMultiAnchorError(
+        srcAnchorsExt, tgtAnchorsExt, pivotX, pivotY,
+        candScale, candRot, candTx, candTy, weights
+      );
 
-  // Translation = target midpoint - transformed source midpoint
-  let translateX = tgtMidX - afterRotX;
-  let translateY = tgtMidY - afterRotY;
-
-  // --- Face-structure stabilizer (nose bridge vertical correction) ---
-  // The corner midpoint alignment handles X well, but Y can drift if
-  // the two faces have different eye-to-nose proportions. We apply a
-  // small correction based on the nose bridge landmark to keep the eye
-  // aligned with the facial midline/nose line.
-  if (faceStabilizer && faceStabilizer.srcNoseBridge && faceStabilizer.tgtNoseBridge) {
-    // Compute how far above the nose bridge each eye corner midpoint sits
-    const srcNoseY = faceStabilizer.srcNoseBridge[1];
-    const tgtNoseY = faceStabilizer.tgtNoseBridge[1];
-    const srcEyeToNose = srcMidY - srcNoseY;
-    const tgtEyeToNose = tgtMidY - tgtNoseY;
-
-    // The nose-relative offset the eye SHOULD have (from target face)
-    // vs where it WILL be after corner-locked translation
-    // Blend this correction at 30% to avoid over-constraining — corners
-    // are the primary lock, nose bridge is a gentle pull toward the face.
-    const noseCorrection = (tgtEyeToNose - srcEyeToNose * scale) * 0.3;
-    translateY += noseCorrection;
+      if (err.totalError < bestError) {
+        bestError = err.totalError;
+        tx = candTx; ty = candTy; rotation = candRot; scale = candScale;
+        improved = true;
+      }
+    }
   }
 
+  // ---- Compute final error (after refinement) ----
+  const finalError = computeMultiAnchorError(
+    srcAnchorsExt, tgtAnchorsExt, pivotX, pivotY, scale, rotation, tx, ty, weights
+  );
+
   return {
-    translateX: Math.round(translateX * 10) / 10,
-    translateY: Math.round(translateY * 10) / 10,
+    translateX: Math.round(tx * 10) / 10,
+    translateY: Math.round(ty * 10) / 10,
     rotation: Math.round(rotation * 1000) / 1000,
     scale: Math.round(scale * 1000) / 1000,
-    // scaleX/scaleY both equal to uniform scale for blink repair.
-    // The executor reads these — both must be uniform to preserve donor openness.
+    // Uniform scale for both axes — preserves donor eye openness for blink repair
     scaleX: Math.round(scale * 1000) / 1000,
     scaleY: Math.round(scale * 1000) / 1000,
-    // Diagnostic: what the lid-height ratio would have been.
-    // NOT applied. Available for future opt-in cosmetic modes.
-    _lidScaleY: Math.round(lidScaleY * 1000) / 1000
+    // Diagnostics (NOT applied — available for debugging and future modes)
+    _lidScaleY: Math.round(lidScaleY * 1000) / 1000,
+    _refinement: {
+      initError: initError.totalError,
+      finalError: finalError.totalError,
+      improvement: Math.round((initError.totalError - finalError.totalError) * 100) / 100,
+      finalAnchors: finalError.perAnchor
+    }
   };
 }
 
@@ -630,16 +735,20 @@ window.detectEyeGeometry = async function(baseUrl, refUrl, baseFaceHint, refFace
     tgtNoseBridge: baseNoseBridge
   };
 
-  // ---- Per-eye transforms ----
-  // Corner-locked: uniform scale from corner distance, rotation from corner
-  // vector, translation solved so corner midpoints land on target corners,
-  // with nose bridge vertical stabilization.
-  // Donor eye openness is PRESERVED — no lid-height vertical squeeze.
-  const leftTransform = computeCornerLockedEyeTransform(
-    refLeftPath, baseLeftPath, refLeftAnchors, baseLeftAnchors, faceStabilizer
+  // ---- Per-eye transforms (two-frame: eye frame → patch frame) ----
+  // Stage 1: Solve anatomical eye placement from multi-anchor error minimization.
+  //   - Corners, iris, lower lid, nose bridge all contribute to the error.
+  //   - Initial guess from corners, then deterministic coordinate-descent refinement.
+  //   - Uniform scale preserves donor eye openness (no lid-height squeeze).
+  // Stage 2: The solved transform is expressed in patch-frame coordinates
+  //   (scale/rotation around patch bbox center + translate) so the executor
+  //   can apply it directly via Photopea. The eye anchors guided the solve,
+  //   but the patch carries the result.
+  const leftTransform = solveEyeFrameTransform(
+    refLeftAnchors, baseLeftAnchors, refLeftBbox, faceStabilizer
   );
-  const rightTransform = computeCornerLockedEyeTransform(
-    refRightPath, baseRightPath, refRightAnchors, baseRightAnchors, faceStabilizer
+  const rightTransform = solveEyeFrameTransform(
+    refRightAnchors, baseRightAnchors, refRightBbox, faceStabilizer
   );
 
   // ---- Confidence ----
