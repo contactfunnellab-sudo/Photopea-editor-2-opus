@@ -74,12 +74,12 @@
             "placementTransform": {
               "type": "object",
               "properties": {
-                "translateX": { "type": "number", "default": 0, "description": "Horizontal translation from two-frame solver. Eye-frame anchors (corners, iris, nose bridge) solved first, then expressed as patch-frame transform around Photopea MIDDLECENTER pivot." },
-                "translateY": { "type": "number", "default": 0, "description": "Vertical translation from two-frame solver with multi-anchor refinement." },
+                "translateX": { "type": "number", "default": 0, "description": "Horizontal translation (bbox center delta, matches Photopea MIDDLECENTER pivot). Solved via multi-anchor coordinate descent." },
+                "translateY": { "type": "number", "default": 0, "description": "Vertical translation (bbox center delta). Solved via multi-anchor coordinate descent." },
                 "rotation": { "type": "number", "default": 0, "description": "Rotation in radians. Initial guess from eye corner vector, refined by coordinate descent minimizing multi-anchor error." },
-                "scale": { "type": "number", "default": 1.0, "description": "Uniform scale. Initial guess from corner distance, refined to minimize multi-anchor error. Used for BOTH axes to preserve donor eye openness." },
-                "scaleX": { "type": "number", "default": 1.0, "description": "Same as scale (uniform). NOT derived from lid height — that would squash donor to match closed base eye." },
-                "scaleY": { "type": "number", "default": 1.0, "description": "Same as scale (uniform). Reserved for future non-blink cosmetic modes." },
+                "scale": { "type": "number", "default": 1.0, "description": "Uniform scale from corner distance ratio (backward compat, average of scaleX/scaleY in non-blink mode)." },
+                "scaleX": { "type": "number", "default": 1.0, "description": "Horizontal scale from landmark corner distance ratio. Geometry-derived, not bbox." },
+                "scaleY": { "type": "number", "default": 1.0, "description": "Vertical scale from landmark upper/lower lid distance ratio (eye opening fit). For blink repair: equals scaleX (uniform, preserves donor openness). For non-blink: geometry-derived from lid aperture." },
                 "_refinement": {
                   "type": "object",
                   "description": "Diagnostic refinement info (not consumed by executor). Contains initError, finalError, improvement, finalAnchors, blinkMode, slitAware, weightProfile.",

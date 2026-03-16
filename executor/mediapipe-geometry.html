@@ -550,15 +550,31 @@ function solveEyeFrameTransform(srcAnchors, tgtAnchors, srcPatchBB, faceStabiliz
     srcAnchorsExt, tgtAnchorsExt, pivotX, pivotY, scale, rotation, tx, ty, weights
   );
 
+  // ---- Derive scaleX/scaleY from landmark correspondences ----
+  // scaleX: horizontal fit from eye corner distance ratio (same as solver's scale)
+  // scaleY: vertical fit from upper↔lower lid distance ratio (eye opening)
+  //
+  // For BLINK REPAIR (isBlink=true): use uniform scale for both axes.
+  //   The base eye is closed — its lid height describes the PROBLEM, not the
+  //   target appearance. Using lid-derived scaleY would squash the open donor
+  //   to match the closed base, which is the opposite of blink repair.
+  //
+  // For NON-BLINK transfer (both eyes open): use landmark-derived scaleY.
+  //   When both eyes are open, lid height is a valid correspondence signal.
+  //   scaleY captures whether the target eye opening is taller/shorter than
+  //   the source, giving a more accurate vertical fit.
+  const finalScaleX = Math.round(scale * 1000) / 1000;
+  const finalScaleY = isBlink
+    ? Math.round(scale * 1000) / 1000      // uniform — preserve donor openness
+    : Math.round(lidScaleY * 1000) / 1000;  // landmark-derived — match target opening
+
   return {
     translateX: Math.round(tx * 10) / 10,
     translateY: Math.round(ty * 10) / 10,
     rotation: Math.round(rotation * 1000) / 1000,
     scale: Math.round(scale * 1000) / 1000,
-    // Uniform scale for both axes — preserves donor eye openness for blink repair
-    scaleX: Math.round(scale * 1000) / 1000,
-    scaleY: Math.round(scale * 1000) / 1000,
-    // Diagnostics (NOT applied — available for debugging and future modes)
+    scaleX: finalScaleX,
+    scaleY: finalScaleY,
     _lidScaleY: Math.round(lidScaleY * 1000) / 1000,
     _refinement: {
       initError: initError.totalError,

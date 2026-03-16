@@ -238,14 +238,21 @@ function buildPathTransferScript(selectionPrimitives) {
     if (useShapeFit) {
       // Non-uniform bbox resize (opt-in legacy mode via fitMode="non_uniform_bbox")
       script.push('feat' + p + '.resize(' + scaleXPct + ', ' + scaleYPct + ', AnchorPosition.MIDDLECENTER);');
-    } else if (scale !== 1.0) {
-      // Default similarity mode: UNIFORM scale from eye corner distance.
-      // For blink repair, both axes use the same scale to preserve the donor
-      // eye's natural openness. Using separate scaleX/scaleY here would risk
-      // squashing the donor to match a closed base eye aperture.
-      // The geometry now ensures scaleX === scaleY === scale for blink repair.
-      var pct = Math.round(scale * 100 * 10) / 10;
-      script.push('feat' + p + '.resize(' + pct + ', ' + pct + ', AnchorPosition.MIDDLECENTER);');
+    } else {
+      // Geometry-derived scale (default similarity mode).
+      // Uses scaleX/scaleY from placementTransform if present (landmark-derived),
+      // falls back to uniform scale. This is NOT the same as non_uniform_bbox:
+      // scaleX/scaleY come from anatomical landmark correspondences in geometry
+      // (corner distance for X, lid distance for Y), not from bbox comparison.
+      // For blink repair, geometry sets scaleX === scaleY (uniform, preserves
+      // donor openness). For non-blink, scaleY may differ (captures eye opening).
+      var sx = (prim.placementTransform && prim.placementTransform.scaleX) || scale;
+      var sy = (prim.placementTransform && prim.placementTransform.scaleY) || scale;
+      var sxPct = Math.round(sx * 100 * 10) / 10;
+      var syPct = Math.round(sy * 100 * 10) / 10;
+      if (sxPct !== 100 || syPct !== 100) {
+        script.push('feat' + p + '.resize(' + sxPct + ', ' + syPct + ', AnchorPosition.MIDDLECENTER);');
+      }
     }
     if (rotation !== 0) {
       var deg = Math.round(rotation * 180 / Math.PI * 100) / 100;
@@ -338,7 +345,9 @@ window.runFeatureTransfer = function(payload) {
           : '';
         logs.push('prim[' + i + '] ' + (sp.label || '?') + ': fit=' + fm + ' mask=' + mm
           + ' scale=' + ((sp.placementTransform && sp.placementTransform.scale) || 'n/a')
-          + ' (uniform, eye-frame solved)' + refInfo);
+          + ' scaleX=' + ((sp.placementTransform && sp.placementTransform.scaleX) || 'n/a')
+          + ' scaleY=' + ((sp.placementTransform && sp.placementTransform.scaleY) || 'n/a')
+          + ' (eye-frame solved)' + refInfo);
       }
     }
     logs.push('Executing path-based transfer (' + count + ' primitive' + (count > 1 ? 's' : '') + ')...');
