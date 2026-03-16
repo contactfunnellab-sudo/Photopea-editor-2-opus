@@ -178,29 +178,33 @@ function roundPoints(points) {
 // by solveEyeFrameTransform() using multi-anchor error minimization.
 // The patch follows the solved eye — it does not define where the eye goes.
 //
-// Margins:
-//   - top (85% of eye height): upper eyelid fold + brow transition
-//   - bottom (65% of eye height): lower lid + under-eye skin + lower lash line
-//   - horizontal (18% of eye width): inner/outer corner skin + blend room
+// Margins (v2 — slightly improved from v1):
+//   - top (90% of eye height): upper eyelid fold + brow transition
+//     Increased from 85% to capture more of the upper lid crease.
+//   - bottom (75% of eye height): lower lid + under-eye skin + lower lash line
+//     Increased from 65% to better capture lower lash texture and
+//     under-eye transition — this was specifically too tight before.
+//   - horizontal (22% of eye width): inner/outer corner skin + blend room
+//     Increased from 18% for more corner skin coverage and blend margin.
+//     The corners are the primary alignment targets, so having enough
+//     blend room around them is important for a natural transition.
 //
 // Lower-lid preservation:
-//   Bottom margin is biased higher than top to capture lower lash texture.
-//   Chaikin smoothing stays at 1 iteration (reduced from original 2) to
-//   preserve angular detail of lower-lid contour — prevents rounding off
-//   the lower lash line into a generic curve.
+//   Bottom margin is proportionally larger to capture lower lash texture.
+//   Chaikin smoothing stays at 1 iteration to preserve angular detail
+//   of lower-lid contour — prevents rounding off the lower lash line.
 //
-// Horizontal margin:
-//   Increased from 15% to 18% for better corner skin coverage. The corners
-//   are the primary alignment targets, so having enough blend room around
-//   them is important for a natural transition.
+// Overall patch size:
+//   This is a MODEST improvement, not a brute-force expansion.
+//   The patch stays local to the eye region.
 function processEyePoints(rawPoints) {
   const bb = boundingBox(rawPoints);
   const eyeW = bb.width;
   const eyeH = bb.height;
 
-  const topMargin = Math.max(4, Math.round(eyeH * 0.85));
-  const bottomMargin = Math.max(4, Math.round(eyeH * 0.65));
-  const hMargin = Math.max(4, Math.round(eyeW * 0.18));
+  const topMargin = Math.max(5, Math.round(eyeH * 0.90));
+  const bottomMargin = Math.max(5, Math.round(eyeH * 0.75));
+  const hMargin = Math.max(5, Math.round(eyeW * 0.22));
 
   let pts = expandPointsAsymmetric(rawPoints, topMargin, bottomMargin, hMargin, hMargin);
   pts = chaikinSmooth(pts, 1);
@@ -363,33 +367,88 @@ function computeMultiAnchorError(srcAnchors, tgtAnchors, pivotX, pivotY, scale, 
 //   locally around the initial guess and finds the transform that minimizes
 //   total weighted anchor error — still fully deterministic and debuggable.
 //
-// ANCHOR WEIGHTS for blink repair:
-//   Corners = highest (1.0) — must land exactly for alignment
-//   Iris center = high (0.7) — gaze direction must feel correct
-//   Lower lid = medium (0.4) — lash line must track face structure
-//   Nose bridge = medium (0.3) — locks eye to face, prevents drift
-//   Upper lid = low (0.1) — corrupted by blink in base, unreliable target
+// ANCHOR WEIGHTS: now mode-aware — see selectAnchorWeights() below.
 // =====================================================================
-function solveEyeFrameTransform(srcAnchors, tgtAnchors, srcPatchBB, faceStabilizer) {
-  const pivotX = srcPatchBB.x + srcPatchBB.width / 2;
-  const pivotY = srcPatchBB.y + srcPatchBB.height / 2;
+// =====================================================================
+// BLINK-AWARE WEIGHT SELECTION
+// =====================================================================
+//
+// WHY MODE-AWARE WEIGHTS:
+//   Generic eye anchors (iris, upper lid, lower lid) are visually
+//   unreliable when the base eye is squinting or closed. The iris may
+//   be hidden, and the lid apices collapse toward each other. Using
+//   those anchors with equal weight creates an objective that can be
+//   "satisfied" while still missing the visible slit line.
+//
+//   For blink repair, the refinement must prioritize:
+//   1. Slit endpoints (where the visible dark line starts/ends)
+//   2. Slit center (midpoint of the visible line)
+//   3. Eye corners (stable regardless of blink state)
+//   4. Face-structure anchor (nose bridge — locks eye to face)
+//   5. Iris / lid apices — low or zero (unreliable under squint)
+//
+//   For open-eye transfer, the current general weights remain correct.
+// =====================================================================
 
-  // Anchor weights — explicit so the objective is clear and tunable
-  const weights = {
+function selectAnchorWeights(blinkMode, hasSlitAnchors) {
+  if (blinkMode && hasSlitAnchors) {
+    // BLINK/SQUINT MODE: prioritize slit-line geometry over hidden-eye landmarks
+    return {
+      anchor1: 1.0,       // eye corner — stable, high priority
+      anchor2: 1.0,       // eye corner — stable, high priority
+      slitLeft: 1.2,      // slit endpoint — highest priority for blink repair
+      slitRight: 1.2,     // slit endpoint — highest priority for blink repair
+      slitCenter: 0.8,    // slit midpoint — high priority
+      irisCenter: 0.1,    // iris often hidden under squint — near-zero
+      lowerLid: 0.15,     // lid apex unreliable when closed — very low
+      upperLid: 0.05      // most corrupted by blink — near-zero
+    };
+  }
+  // GENERAL MODE: balanced weights for open-eye transfer
+  return {
     anchor1: 1.0,       // outer/inner corner — highest priority
     anchor2: 1.0,       // other corner — highest priority
     irisCenter: 0.7,    // gaze alignment
     lowerLid: 0.4,      // lower-lash / face structure
-    upperLid: 0.1       // low — corrupted by blink in base
+    upperLid: 0.1       // low — less reliable than corners
   };
+}
 
-  // Add face-structure anchor (nose bridge) to both anchor sets for error computation
+function solveEyeFrameTransform(srcAnchors, tgtAnchors, srcPatchBB, faceStabilizer, blinkInfo) {
+  const pivotX = srcPatchBB.x + srcPatchBB.width / 2;
+  const pivotY = srcPatchBB.y + srcPatchBB.height / 2;
+
+  // Determine if we're in blink/squint mode and have slit targets
+  const isBlink = blinkInfo && blinkInfo.baseMoreClosed;
+  const tgtSlit = blinkInfo && blinkInfo.tgtSlitTarget;
+  const srcSlit = blinkInfo && blinkInfo.srcSlitTarget;
+  const hasSlitAnchors = isBlink && tgtSlit && srcSlit && tgtSlit.isSquinting;
+
+  // Select weight profile based on blink mode
+  const weights = selectAnchorWeights(isBlink, hasSlitAnchors);
+
+  // Build extended anchor sets with slit targets when available
   const srcAnchorsExt = { ...srcAnchors };
   const tgtAnchorsExt = { ...tgtAnchors };
+
+  // Add slit-line anchors for blink/squint mode
+  // The slit target defines where the visible dark line is in the base image.
+  // The source slit is derived from the donor — even though the donor is open,
+  // the corner-derived slit endpoints give a consistent correspondence.
+  if (hasSlitAnchors) {
+    srcAnchorsExt.slitLeft = srcSlit.slitLeft;
+    srcAnchorsExt.slitRight = srcSlit.slitRight;
+    srcAnchorsExt.slitCenter = srcSlit.slitCenter;
+    tgtAnchorsExt.slitLeft = tgtSlit.slitLeft;
+    tgtAnchorsExt.slitRight = tgtSlit.slitRight;
+    tgtAnchorsExt.slitCenter = tgtSlit.slitCenter;
+  }
+
+  // Add face-structure anchor (nose bridge) to both anchor sets for error computation
   if (faceStabilizer && faceStabilizer.srcNoseBridge && faceStabilizer.tgtNoseBridge) {
     srcAnchorsExt.noseBridge = faceStabilizer.srcNoseBridge;
     tgtAnchorsExt.noseBridge = faceStabilizer.tgtNoseBridge;
-    weights.noseBridge = 0.3;
+    weights.noseBridge = isBlink ? 0.4 : 0.3;  // slightly higher in blink mode for face lock
   }
 
   // ---- Initial guess from corners (closed-form) ----
@@ -501,7 +560,10 @@ function solveEyeFrameTransform(srcAnchors, tgtAnchors, srcPatchBB, faceStabiliz
       initError: initError.totalError,
       finalError: finalError.totalError,
       improvement: Math.round((initError.totalError - finalError.totalError) * 100) / 100,
-      finalAnchors: finalError.perAnchor
+      finalAnchors: finalError.perAnchor,
+      blinkMode: isBlink || false,
+      slitAware: hasSlitAnchors || false,
+      weightProfile: isBlink ? 'blink_squint' : 'general'
     }
   };
 }
@@ -540,6 +602,100 @@ function eyeAspectRatio(leftEyePoints, rightEyePoints) {
     return bb.height / bb.width;
   }
   return (ear(leftEyePoints) + ear(rightEyePoints)) / 2;
+}
+
+// =====================================================================
+// SQUINT-LINE / SLIT TARGET DERIVATION
+// =====================================================================
+//
+// WHY THIS EXISTS:
+//   In a blink or squint image, the visible "eye" is a narrow dark slit
+//   formed by the nearly-closed eyelids. A human viewer reads that black
+//   line as the eye's location, angle, and extent. If we align the donor
+//   eye using generic eye-region landmarks (corners, iris, lid apex),
+//   the result can reduce anchor error while still missing the visually
+//   correct slit endpoints and slit axis. The user specifically observed
+//   that the result never aligns to that black line.
+//
+//   This function derives a deterministic slit-line target from the
+//   existing eye landmarks for a closed/squinting base eye. The slit
+//   endpoints, center, and angle become first-class placement targets
+//   that the refinement solver can prioritize.
+//
+// HOW IT WORKS:
+//   For a closed/squinting eye, the upper and lower lid converge toward
+//   a single line. The slit is the visible gap between them:
+//   - slitLeft / slitRight: derived from inner/outer corners, pulled
+//     toward the vertical midpoint between upper and lower lid apex
+//     to model how corners pinch together during squint
+//   - slitCenter: midpoint of the slit segment
+//   - slitAngle: angle of the slit segment in radians
+//   - slitAperture: vertical gap between upper and lower lid at center
+//     (diagnostic — NOT used to scale the donor)
+//
+// IMPORTANT:
+//   The slit target defines WHERE the donor eye should be placed.
+//   It does NOT define the donor's openness — the donor stays open.
+// =====================================================================
+
+function deriveSquintLineTarget(anchors, ear) {
+  // anchors: { anchor1: [x,y] (outer/inner corner), anchor2: [x,y] (other corner),
+  //            upperLid: [x,y], lowerLid: [x,y], irisCenter: [x,y] }
+  // ear: eye aspect ratio for this specific eye (lower = more closed)
+
+  const corner1 = anchors.anchor1;
+  const corner2 = anchors.anchor2;
+  const upperLid = anchors.upperLid;
+  const lowerLid = anchors.lowerLid;
+
+  // Lid midpoint: vertical center between upper and lower lid apex.
+  // In a squint, this is where the slit line sits vertically.
+  const lidMidY = (upperLid[1] + lowerLid[1]) / 2;
+  const lidMidX = (upperLid[0] + lowerLid[0]) / 2;
+
+  // Squint intensity: how much to pull slit endpoints toward lid midline.
+  // At EAR ~0.25+ (open), pull is minimal. At EAR ~0.05 (shut), pull is strong.
+  // Clamped blend factor: 0.0 (open) to 0.6 (fully squinted).
+  const squintBlend = Math.max(0, Math.min(0.6, (0.25 - ear) * 3.0));
+
+  // Slit endpoints: corners pulled toward the lid midline vertically.
+  // The horizontal position stays at the corner — only vertical shifts.
+  const slitLeft = [
+    corner1[0],
+    corner1[1] + (lidMidY - corner1[1]) * squintBlend
+  ];
+  const slitRight = [
+    corner2[0],
+    corner2[1] + (lidMidY - corner2[1]) * squintBlend
+  ];
+
+  // Slit center: midpoint of slit segment
+  const slitCenter = [
+    (slitLeft[0] + slitRight[0]) / 2,
+    (slitLeft[1] + slitRight[1]) / 2
+  ];
+
+  // Slit angle: direction of the slit segment
+  const slitAngle = Math.atan2(
+    slitRight[1] - slitLeft[1],
+    slitRight[0] - slitLeft[0]
+  );
+
+  // Slit aperture: vertical gap between lids at center (diagnostic only)
+  const slitAperture = Math.sqrt(
+    Math.pow(upperLid[0] - lowerLid[0], 2) +
+    Math.pow(upperLid[1] - lowerLid[1], 2)
+  );
+
+  return {
+    slitLeft: [Math.round(slitLeft[0] * 10) / 10, Math.round(slitLeft[1] * 10) / 10],
+    slitRight: [Math.round(slitRight[0] * 10) / 10, Math.round(slitRight[1] * 10) / 10],
+    slitCenter: [Math.round(slitCenter[0] * 10) / 10, Math.round(slitCenter[1] * 10) / 10],
+    slitAngle: Math.round(slitAngle * 1000) / 1000,
+    slitAperture: Math.round(slitAperture * 10) / 10,
+    squintBlend: Math.round(squintBlend * 1000) / 1000,
+    isSquinting: squintBlend > 0.05
+  };
 }
 
 // ---- Blend Policy ----
@@ -744,14 +900,68 @@ window.detectEyeGeometry = async function(baseUrl, refUrl, baseFaceHint, refFace
   //   (scale/rotation around patch bbox center + translate) so the executor
   //   can apply it directly via Photopea. The eye anchors guided the solve,
   //   but the patch carries the result.
+
+  // ---- STEP 5: Eye aspect ratio / blink heuristic ----
+  // MUST be computed before blinkInfo and slit targets.
+  const baseEAR = eyeAspectRatio(baseLeftRaw, baseRightRaw);
+  const refEAR = eyeAspectRatio(refLeftRaw, refRightRaw);
+  const baseMoreClosed = baseEAR < refEAR;
+
+  // ---- STEP 6: Per-eye EAR for slit target derivation ----
+  function singleEyeEAR(pts) {
+    const bb = boundingBox(pts);
+    if (bb.width < 1) return 0;
+    return bb.height / bb.width;
+  }
+  const baseLeftEAR = singleEyeEAR(baseLeftRaw);
+  const baseRightEAR = singleEyeEAR(baseRightRaw);
+  const refLeftEAR = singleEyeEAR(refLeftRaw);
+  const refRightEAR = singleEyeEAR(refRightRaw);
+
+  // ---- STEP 7: Squint-line / slit targets for blink repair ----
+  // Derive the visible slit geometry from base eye landmarks.
+  // Also derive source (donor) slit for anchor correspondence.
+  const baseLeftSlit = deriveSquintLineTarget(baseLeftAnchors, baseLeftEAR);
+  const baseRightSlit = deriveSquintLineTarget(baseRightAnchors, baseRightEAR);
+  const refLeftSlit = deriveSquintLineTarget(refLeftAnchors, refLeftEAR);
+  const refRightSlit = deriveSquintLineTarget(refRightAnchors, refRightEAR);
+
+  // ---- STEP 8: Build blinkInfo (depends on steps 5-7) ----
+  // blinkInfo carries per-eye slit targets and overall blink state.
+  // The slit target defines the visible squint line in the base image.
+  // The solver uses slit endpoints/center as first-class placement
+  // targets when the base eye is more closed than the reference.
+  if (typeof baseMoreClosed !== 'boolean' || !baseLeftSlit || !baseRightSlit || !refLeftSlit || !refRightSlit) {
+    throw new Error('Blink/slit targets not initialized before transform solve — check execution order');
+  }
+  const leftBlinkInfo = {
+    baseMoreClosed: baseMoreClosed,
+    tgtSlitTarget: baseLeftSlit,
+    srcSlitTarget: refLeftSlit
+  };
+  const rightBlinkInfo = {
+    baseMoreClosed: baseMoreClosed,
+    tgtSlitTarget: baseRightSlit,
+    srcSlitTarget: refRightSlit
+  };
+
+  console.log('[geometry] blink: baseEAR=' + baseEAR.toFixed(3) + ' refEAR=' + refEAR.toFixed(3)
+    + ' baseMoreClosed=' + baseMoreClosed
+    + ' slitL=' + baseLeftSlit.isSquinting + ' slitR=' + baseRightSlit.isSquinting);
+
+  // ---- STEP 9: Solve transforms (depends on step 8) ----
   const leftTransform = solveEyeFrameTransform(
-    refLeftAnchors, baseLeftAnchors, refLeftBbox, faceStabilizer
+    refLeftAnchors, baseLeftAnchors, refLeftBbox, faceStabilizer, leftBlinkInfo
   );
   const rightTransform = solveEyeFrameTransform(
-    refRightAnchors, baseRightAnchors, refRightBbox, faceStabilizer
+    refRightAnchors, baseRightAnchors, refRightBbox, faceStabilizer, rightBlinkInfo
   );
 
-  // ---- Confidence ----
+  console.log('[geometry] transforms solved: L_err=' + leftTransform._refinement.finalError
+    + ' R_err=' + rightTransform._refinement.finalError
+    + ' profile=' + leftTransform._refinement.weightProfile);
+
+  // ---- STEP 10: Confidence, blend, response ----
   let confidence = 1.0;
   const avgScale = (leftTransform.scale + rightTransform.scale) / 2;
   const avgRot = (Math.abs(leftTransform.rotation) + Math.abs(rightTransform.rotation)) / 2;
@@ -763,10 +973,6 @@ window.detectEyeGeometry = async function(baseUrl, refUrl, baseFaceHint, refFace
   // ---- Blend policy per eye ----
   const leftBlend = eyeBlendPolicy(leftTransform, confidence, refLeftPath);
   const rightBlend = eyeBlendPolicy(rightTransform, confidence, refRightPath);
-
-  // ---- Eye aspect ratio for blink detection ----
-  const baseEAR = eyeAspectRatio(baseLeftRaw, baseRightRaw);
-  const refEAR = eyeAspectRatio(refLeftRaw, refRightRaw);
 
   // ---- Debug rendering ----
   renderDebug(baseImg, baseFaces, baseFaceIdx, baseLeftRaw, baseRightRaw, baseLeftBbox, baseRightBbox, 'BASE (target)');
@@ -791,7 +997,13 @@ window.detectEyeGeometry = async function(baseUrl, refUrl, baseFaceHint, refFace
     blinkHeuristic: {
       baseEAR: Math.round(baseEAR * 1000) / 1000,
       refEAR: Math.round(refEAR * 1000) / 1000,
-      baseMoreClosed: baseEAR < refEAR
+      baseMoreClosed: baseMoreClosed,
+      perEye: {
+        baseLeftEAR: Math.round(baseLeftEAR * 1000) / 1000,
+        baseRightEAR: Math.round(baseRightEAR * 1000) / 1000,
+        refLeftEAR: Math.round(refLeftEAR * 1000) / 1000,
+        refRightEAR: Math.round(refRightEAR * 1000) / 1000
+      }
     },
     features: [
       {
@@ -799,14 +1011,16 @@ window.detectEyeGeometry = async function(baseUrl, refUrl, baseFaceHint, refFace
         source: { rawPoints: refLeftRaw, pathPoints: refLeftPath, boundingBox: refLeftBbox },
         target: { rawPoints: baseLeftRaw, pathPoints: baseLeftPath, boundingBox: baseLeftBbox },
         placementTransform: leftTransform,
-        recommendedBlend: leftBlend
+        recommendedBlend: leftBlend,
+        _slitTarget: baseLeftSlit
       },
       {
         name: 'right_eye',
         source: { rawPoints: refRightRaw, pathPoints: refRightPath, boundingBox: refRightBbox },
         target: { rawPoints: baseRightRaw, pathPoints: baseRightPath, boundingBox: baseRightBbox },
         placementTransform: rightTransform,
-        recommendedBlend: rightBlend
+        recommendedBlend: rightBlend,
+        _slitTarget: baseRightSlit
       }
     ],
     confidence: confidence,

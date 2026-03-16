@@ -330,8 +330,11 @@ window.runFeatureTransfer = function(payload) {
           + ' scaleY=' + (Math.round((tBB.height / sBB.height) * 1000) / 1000)
           + ' maskFeather=' + mf);
       } else {
-        var refInfo = (sp.placementTransform && sp.placementTransform._refinement)
-          ? ' refined=' + sp.placementTransform._refinement.initError + '->' + sp.placementTransform._refinement.finalError
+        var ref = sp.placementTransform && sp.placementTransform._refinement;
+        var refInfo = ref
+          ? ' refined=' + ref.initError + '->' + ref.finalError
+            + ' profile=' + (ref.weightProfile || '?')
+            + ' slitAware=' + (ref.slitAware || false)
           : '';
         logs.push('prim[' + i + '] ' + (sp.label || '?') + ': fit=' + fm + ' mask=' + mm
           + ' scale=' + ((sp.placementTransform && sp.placementTransform.scale) || 'n/a')
